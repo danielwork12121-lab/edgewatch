@@ -1,18 +1,14 @@
 import { useState, useEffect } from 'react'
 import type { WalletTrade, WalletPosition } from '../types'
-import {
-  getWalletActivity,
-  getWalletPositions,
-  filterNoise,
-  truncateAddress,
-} from '../api/wallets'
+import { getWalletActivity, getWalletPositions, filterNoise, truncateAddress } from '../api/wallets'
 import { formatUSD, formatDate } from '../api/polymarket'
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
-import { computeCopySignal } from '../api/priceHistory'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
 import EdgeScoreCard from './EdgeScoreCard'
 import PriceChart from './PriceChart'
+import PnLGraph from './PnLGraph'
+import CopyTradingModule from './CopyTradingModule'
 
 interface Props {
   address: string
@@ -20,36 +16,23 @@ interface Props {
   onViewPortfolio?: () => void
 }
 
+type ProfileTab = 'overview' | 'trades' | 'charts'
+
 function TradeRow({
   trade,
-  score,
   onFollow,
   allTradesForMarket,
 }: {
   trade: WalletTrade
-  score: EdgeScore | null
   onFollow: (t: WalletTrade) => void
   allTradesForMarket: WalletTrade[]
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [chartOpen, setChartOpen] = useState(false)
   const isBuy = trade.side === 'BUY'
   const time = new Date(trade.timestamp * 1000).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   })
-
-  // Copy signal (uses EdgeScore data + trade size)
-  const copySignal = score
-    ? computeCopySignal(score.overall, score.entryEdgeScore / 100, 50_000, trade.usdcSize ?? 0)
-    : null
-
-  // Get CLOB token ID for chart (outcome-specific)
-  let tokenId = trade.asset ?? ''
-  if (!tokenId) {
-    try {
-      const ids = JSON.parse('')
-      tokenId = ids[0] ?? ''
-    } catch { /* no token */ }
-  }
+  const tokenId = trade.asset ?? ''
 
   return (
     <div className="trade-row">
@@ -57,16 +40,14 @@ function TradeRow({
         <span className={`side-badge ${isBuy ? 'buy' : 'sell'}`}>{trade.side}</span>
         <span className="trade-title">{trade.title}</span>
         <div style={{ display: 'flex', gap: 6, marginLeft: 'auto', flexShrink: 0 }}>
-          {copySignal && (
-            <span className={`copy-signal-badge signal-${copySignal.label.toLowerCase()}`}>
-              {copySignal.label} · {copySignal.allocationPct.toFixed(1)}% alloc
-            </span>
-          )}
           <button className="follow-btn" onClick={() => onFollow(trade)}>+ Follow</button>
           {tokenId && (
-            <button className="follow-btn" style={{ background: 'none', borderColor: 'var(--border)' }}
-              onClick={() => setExpanded(e => !e)}>
-              {expanded ? '▲ Chart' : '▼ Chart'}
+            <button
+              className="follow-btn"
+              style={{ background: 'none', borderColor: 'var(--border)', color: 'var(--text)' }}
+              onClick={() => setChartOpen(o => !o)}
+            >
+              {chartOpen ? '▲' : '▼'} Chart
             </button>
           )}
         </div>
@@ -77,7 +58,7 @@ function TradeRow({
         <span className="stat prob">@ {((trade.price ?? 0) * 100).toFixed(0)}¢</span>
         <span className="stat date">{time}</span>
       </div>
-      {expanded && tokenId && (
+      {chartOpen && tokenId && (
         <div style={{ marginTop: 12 }}>
           <PriceChart
             tokenId={tokenId}
@@ -96,51 +77,28 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [minSize, setMinSize] = useState(1)
+  const [tab, setTab] = useState<ProfileTab>('overview')
   const [followMsg, setFollowMsg] = useState<string | null>(null)
   const [watching, setWatching] = useState(() => isWatchingWallet(address))
   const [score, setScore] = useState<EdgeScore | null>(null)
   const [scoreLoading, setScoreLoading] = useState(false)
 
-  const handleToggleWatch = () => {
-    const pseudonym = trades[0]?.pseudonym ?? ''
-    const name = trades[0]?.name ?? ''
-    if (watching) {
-      unwatchWallet(address)
-      setWatching(false)
-    } else {
-      watchWallet(address, pseudonym, name)
-      setWatching(true)
-    }
-  }
-
-  const handleFollow = (trade: WalletTrade) => {
-    let p = loadPortfolio()
-    if (!p) p = createPortfolio(1000)
-    // Default paper size: 10 USDC or 1/10 of original trade, whichever is smaller
-    const paperSize = Math.min(10, (trade.usdcSize ?? 10) / 10)
-    const updated = addSimulatedTrade(p, trade, Math.max(1, paperSize))
-    savePortfolio(updated)
-    setFollowMsg(`Added to paper portfolio: ${trade.title} (${formatUSD(Math.max(1, paperSize))})`)
-    setTimeout(() => setFollowMsg(null), 3000)
-  }
-
   useEffect(() => {
     setLoading(true)
     setError(null)
     setScore(null)
+    setTrades([])
+    setPositions([])
     Promise.all([
       getWalletActivity(address, 200),
-      getWalletPositions(address, 50),
+      getWalletPositions(address, 100),
     ])
-      .then(([acts, pos]) => {
-        setTrades(acts)
-        setPositions(pos)
-      })
+      .then(([acts, pos]) => { setTrades(acts); setPositions(pos) })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }, [address])
 
-  // Compute entry-based score after trades load (async — fetches live prices)
+  // Async entry-based scoring (fetches live prices)
   useEffect(() => {
     const noisy = filterNoise(trades, minSize)
     if (noisy.length === 0) { setScore(null); return }
@@ -151,14 +109,33 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
       .finally(() => setScoreLoading(false))
   }, [address, minSize, trades.length])
 
+  const handleToggleWatch = () => {
+    const pseudonym = trades[0]?.pseudonym ?? ''
+    const name = trades[0]?.name ?? ''
+    if (watching) { unwatchWallet(address); setWatching(false) }
+    else { watchWallet(address, pseudonym, name); setWatching(true) }
+  }
+
+  const handleFollow = (trade: WalletTrade) => {
+    let p = loadPortfolio()
+    if (!p) p = createPortfolio(1000)
+    const paperSize = Math.max(1, Math.min(10, (trade.usdcSize ?? 10) / 10))
+    savePortfolio(addSimulatedTrade(p, trade, paperSize))
+    setFollowMsg(`Followed: ${trade.title} (Paper ${formatUSD(paperSize)})`)
+    setTimeout(() => setFollowMsg(null), 3500)
+  }
+
   const filtered = filterNoise(trades, minSize)
   const marketCount = new Set(filtered.map(t => t.conditionId)).size
   const totalVol = filtered.reduce((s, t) => s + (t.usdcSize ?? 0), 0)
   const pseudonym = trades[0]?.pseudonym || ''
   const name = trades[0]?.name || ''
 
-  const openPnl = positions.reduce((s, p) => s + (p.currentValue ?? 0), 0)
+  const positionsWithValue = positions.filter(p => (p.initialValue ?? 0) > 0)
   const realizedPnl = positions.reduce((s, p) => s + (p.realizedPnl ?? 0), 0)
+  const openValue = positions.reduce((s, p) => s + (p.currentValue ?? 0), 0)
+  const wins = positionsWithValue.filter(p => (p.cashPnl ?? 0) >= 0).length
+  const winRate = positionsWithValue.length > 0 ? wins / positionsWithValue.length : null
 
   return (
     <div className="detail-page">
@@ -172,24 +149,16 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
         </button>
         {onViewPortfolio && (
           <button className="back-btn" onClick={onViewPortfolio} style={{ marginLeft: 'auto' }}>
-            Paper Portfolio
+            Portfolio
           </button>
         )}
       </div>
 
-      {followMsg && (
-        <div className="follow-toast">{followMsg}</div>
-      )}
+      {followMsg && <div className="follow-toast">{followMsg}</div>}
 
       <div className="wallet-header">
-        <div>
-          <h2 className="detail-title">
-            {pseudonym || name || truncateAddress(address)}
-          </h2>
-          {(pseudonym || name) && (
-            <p className="wallet-address">{truncateAddress(address)}</p>
-          )}
-        </div>
+        <h2 className="detail-title">{pseudonym || name || truncateAddress(address)}</h2>
+        {(pseudonym || name) && <p className="wallet-address">{truncateAddress(address)}</p>}
       </div>
 
       {loading && <p className="empty-msg">Loading wallet data…</p>}
@@ -197,19 +166,20 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
 
       {!loading && !error && (
         <>
+          {/* ── Copy Trading Module — top of page ── */}
+          <CopyTradingModule
+            score={score}
+            trades={filtered}
+            winRate={winRate}
+            onViewPortfolio={onViewPortfolio}
+            onFollowMsg={msg => { setFollowMsg(msg); setTimeout(() => setFollowMsg(null), 4000) }}
+          />
+
           <div className="data-source-label">
-            Data source: <strong>Polymarket public activity API</strong> · Real trade history
+            Polymarket public API · {filtered.length} trades · {positionsWithValue.length} positions
           </div>
 
-          {(score || scoreLoading) && (
-            <EdgeScoreCard score={score ?? {
-              overall: 0, entryEdgeScore: 0, repeatabilityScore: 0,
-              sampleConfidence: 'very_low', sampleSize: 0, pricesResolved: 0,
-              marketsTraded: 0, totalVolumeUSDC: 0, avgDeltaCents: 0,
-              breakdown: { positiveDeltaTrades: 0, negativeDeltaTrades: 0, unresolvedTrades: 0 }
-            }} loading={scoreLoading} />
-          )}
-
+          {/* ── Stats row ── */}
           <div className="wallet-stats-row">
             <div className="wallet-stat">
               <span className="wallet-stat-val">{filtered.length}</span>
@@ -223,6 +193,14 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               <span className="wallet-stat-val">{formatUSD(totalVol)}</span>
               <span className="wallet-stat-label">Volume</span>
             </div>
+            {winRate !== null && (
+              <div className="wallet-stat">
+                <span className={`wallet-stat-val ${winRate >= 0.5 ? 'pnl-pos' : 'pnl-neg'}`}>
+                  {(winRate * 100).toFixed(0)}%
+                </span>
+                <span className="wallet-stat-label">Win Rate</span>
+              </div>
+            )}
             <div className="wallet-stat">
               <span className={`wallet-stat-val ${realizedPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
                 {realizedPnl >= 0 ? '+' : ''}{formatUSD(realizedPnl)}
@@ -230,71 +208,137 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               <span className="wallet-stat-label">Realized PnL</span>
             </div>
             <div className="wallet-stat">
-              <span className={`wallet-stat-val ${openPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
-                {openPnl >= 0 ? '+' : ''}{formatUSD(openPnl)}
+              <span className={`wallet-stat-val ${openValue >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
+                {formatUSD(openValue)}
               </span>
               <span className="wallet-stat-label">Open Value</span>
             </div>
           </div>
 
-          {positions.length > 0 && (
+          {/* ── Tabs ── */}
+          <div className="tab-bar">
+            <button className={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
+              Performance
+            </button>
+            <button className={`tab-btn ${tab === 'trades' ? 'active' : ''}`} onClick={() => setTab('trades')}>
+              Trade History ({filtered.length})
+            </button>
+            <button className={`tab-btn ${tab === 'charts' ? 'active' : ''}`} onClick={() => setTab('charts')}>
+              Entry Charts
+            </button>
+          </div>
+
+          {/* ── Performance tab: EdgeScore + PnL graph + positions ── */}
+          {tab === 'overview' && (
+            <>
+              {(score || scoreLoading) && (
+                <EdgeScoreCard
+                  score={score ?? {
+                    overall: 0, entryEdgeScore: 0, repeatabilityScore: 0,
+                    sampleConfidence: 'very_low', sampleSize: 0, pricesResolved: 0,
+                    marketsTraded: 0, totalVolumeUSDC: 0, avgDeltaCents: 0,
+                    breakdown: { positiveDeltaTrades: 0, negativeDeltaTrades: 0, unresolvedTrades: 0 },
+                  }}
+                  loading={scoreLoading}
+                />
+              )}
+
+              {positionsWithValue.length > 0 && (
+                <section className="wallet-section">
+                  <h3 className="markets-list-title">PnL History ({positionsWithValue.length} positions)</h3>
+                  <PnLGraph positions={positionsWithValue} />
+                </section>
+              )}
+
+              {positions.length > 0 && (
+                <section className="wallet-section">
+                  <h3 className="markets-list-title">Open Positions ({positions.length})</h3>
+                  {positions.map(pos => (
+                    <div key={pos.asset} className="position-row">
+                      <div className="position-top">
+                        <span className="trade-title">{pos.title}</span>
+                        <span className={`pnl-badge ${(pos.cashPnl ?? 0) >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
+                          {(pos.cashPnl ?? 0) >= 0 ? '+' : ''}{formatUSD(pos.cashPnl ?? 0)}
+                        </span>
+                      </div>
+                      <div className="trade-row-meta">
+                        <span className="trade-outcome">{pos.outcome}</span>
+                        <span className="stat vol">{pos.size.toFixed(0)} shares @ {((pos.avgPrice ?? 0) * 100).toFixed(0)}¢</span>
+                        <span className="stat date">Closes {formatDate(pos.endDate)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </section>
+              )}
+            </>
+          )}
+
+          {/* ── Trade History tab ── */}
+          {tab === 'trades' && (
             <section className="wallet-section">
-              <h3 className="markets-list-title">Open Positions ({positions.length})</h3>
-              {positions.map(pos => (
-                <div key={pos.asset} className="position-row">
-                  <div className="position-top">
-                    <span className="trade-title">{pos.title}</span>
-                    <span className={`pnl-badge ${pos.cashPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
-                      {pos.cashPnl >= 0 ? '+' : ''}{formatUSD(pos.cashPnl)}
-                    </span>
-                  </div>
-                  <div className="trade-row-meta">
-                    <span className="trade-outcome">{pos.outcome}</span>
-                    <span className="stat vol">{pos.size.toFixed(0)} shares @ {((pos.avgPrice ?? 0) * 100).toFixed(0)}¢</span>
-                    <span className="stat date">Closes {formatDate(pos.endDate)}</span>
-                  </div>
+              <div className="section-header">
+                <h3 className="markets-list-title">Trade History</h3>
+                <div className="filter-row">
+                  <label className="filter-label">Min size:</label>
+                  <select
+                    className="filter-select"
+                    value={minSize}
+                    onChange={e => setMinSize(Number(e.target.value))}
+                  >
+                    <option value={0}>All</option>
+                    <option value={1}>$1+</option>
+                    <option value={10}>$10+</option>
+                    <option value={50}>$50+</option>
+                    <option value={100}>$100+</option>
+                  </select>
                 </div>
+              </div>
+              {filtered.length === 0 && <p className="empty-msg">No trades above the size filter.</p>}
+              {filtered.slice(0, 100).map((t, i) => (
+                <TradeRow
+                  key={t.transactionHash ?? i}
+                  trade={t}
+                  onFollow={handleFollow}
+                  allTradesForMarket={filtered.filter(x => x.conditionId === t.conditionId)}
+                />
               ))}
+              {filtered.length > 100 && (
+                <p className="empty-msg">Showing first 100 of {filtered.length} trades.</p>
+              )}
             </section>
           )}
 
-          <section className="wallet-section">
-            <div className="section-header">
-              <h3 className="markets-list-title">Trade History ({filtered.length})</h3>
-              <div className="filter-row">
-                <label className="filter-label">Min size:</label>
-                <select
-                  className="filter-select"
-                  value={minSize}
-                  onChange={e => setMinSize(Number(e.target.value))}
-                >
-                  <option value={0}>All</option>
-                  <option value={1}>$1+</option>
-                  <option value={10}>$10+</option>
-                  <option value={50}>$50+</option>
-                  <option value={100}>$100+</option>
-                </select>
-              </div>
-            </div>
-            {filtered.length === 0 && (
-              <p className="empty-msg">No trades above the size filter.</p>
-            )}
-            {filtered.slice(0, 100).map((t, i) => {
-              const marketTrades = filtered.filter(x => x.conditionId === t.conditionId)
-              return (
-                <TradeRow
-                  key={`${t.transactionHash ?? i}`}
-                  trade={t}
-                  score={score}
-                  onFollow={handleFollow}
-                  allTradesForMarket={marketTrades}
-                />
-              )
-            })}
-            {filtered.length > 100 && (
-              <p className="empty-msg">Showing first 100 of {filtered.length} trades.</p>
-            )}
-          </section>
+          {/* ── Entry Charts tab: show charts for each unique market ── */}
+          {tab === 'charts' && (
+            <section className="wallet-section">
+              <p className="score-disclaimer" style={{ marginBottom: 16 }}>
+                Price chart + entry markers for each market this wallet traded.
+                Green line = entry (BUY), red line = entry (SELL).
+              </p>
+              {(() => {
+                // Unique markets with their first CLOB token
+                const seen = new Set<string>()
+                const markets: { conditionId: string; asset: string; title: string; trades: WalletTrade[] }[] = []
+                for (const t of filtered) {
+                  if (!seen.has(t.conditionId) && t.asset) {
+                    seen.add(t.conditionId)
+                    markets.push({
+                      conditionId: t.conditionId,
+                      asset: t.asset,
+                      title: t.title,
+                      trades: filtered.filter(x => x.conditionId === t.conditionId),
+                    })
+                  }
+                }
+                if (markets.length === 0) return <p className="empty-msg">No chart data available.</p>
+                return markets.slice(0, 10).map(m => (
+                  <div key={m.conditionId} style={{ marginBottom: 20 }}>
+                    <PriceChart tokenId={m.asset} trades={m.trades} title={m.title} />
+                  </div>
+                ))
+              })()}
+            </section>
+          )}
         </>
       )}
     </div>

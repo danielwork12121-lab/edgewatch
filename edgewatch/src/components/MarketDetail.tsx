@@ -1,14 +1,17 @@
-import { useState } from 'react'
-import type { PolyEvent, PolyMarket, WalletTrade } from '../types'
-import { parseOutcomePrices, parseOutcomes, formatUSD, formatDate } from '../api/polymarket'
-import { getMarketTrades, filterNoise, truncateAddress } from '../api/wallets'
+import { useState, useEffect } from 'react'
+import type { PolyEvent, PolyMarket, TraderRankEntry } from '../types'
+import { parseOutcomePrices, parseOutcomes, formatUSD, formatDate, timeRemaining, volatilityInfo } from '../api/polymarket'
 import { watchMarket, unwatchMarket, isWatchingMarket } from '../api/watchlist'
+import { rankTradersForMarket, enrichWithPnL, type BestTrade } from '../api/traders'
+import { truncateAddress } from '../api/wallets'
 
 interface Props {
   event: PolyEvent
   onBack: () => void
   onSelectWallet: (address: string) => void
 }
+
+// ── Market Overview ──────────────────────────────────────────────────────────
 
 function OutcomeBar({ label, price }: { label: string; price: number }) {
   const pct = (price * 100).toFixed(1)
@@ -25,220 +28,300 @@ function OutcomeBar({ label, price }: { label: string; price: number }) {
   )
 }
 
-function MarketRow({ market }: { market: PolyMarket }) {
+function MarketOverview({ event }: { event: PolyEvent }) {
+  const totalVol = (event.markets ?? []).reduce((s, m) => s + (m.volume ?? 0), 0) || event.volume || 0
+  const totalLiq = (event.markets ?? []).reduce((s, m) => s + (m.liquidity ?? 0), 0) || event.liquidity || 0
+  const firstMkt = event.markets?.[0]
+  const vol = volatilityInfo(firstMkt?.oneDayPriceChange)
+  const remain = timeRemaining(event.endDate)
+
+  return (
+    <div className="market-overview">
+      <div className="market-overview-stats">
+        <div className="overview-stat">
+          <span className="overview-stat-val">{formatUSD(totalVol)}</span>
+          <span className="overview-stat-label">Total Volume</span>
+        </div>
+        <div className="overview-stat">
+          <span className="overview-stat-val">{formatUSD(totalLiq)}</span>
+          <span className="overview-stat-label">Liquidity</span>
+        </div>
+        <div className="overview-stat">
+          <span className={`overview-stat-val vol-${vol.level}`}>{vol.label}</span>
+          <span className="overview-stat-label">Volatility</span>
+        </div>
+        <div className="overview-stat">
+          <span className="overview-stat-val">{remain}</span>
+          <span className="overview-stat-label">Time Remaining</span>
+        </div>
+        {firstMkt?.lastTradePrice !== undefined && (
+          <div className="overview-stat">
+            <span className="overview-stat-val">{((firstMkt.lastTradePrice ?? 0) * 100).toFixed(1)}¢</span>
+            <span className="overview-stat-label">Last Price</span>
+          </div>
+        )}
+      </div>
+
+      <div className="markets-list">
+        {(event.markets ?? []).map(m => <MarketSubRow key={m.id} market={m} />)}
+        {(!event.markets || event.markets.length === 0) && (
+          <p className="empty-msg">No sub-markets.</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function MarketSubRow({ market }: { market: PolyMarket }) {
   const prices = parseOutcomePrices(market.outcomePrices)
   const outcomes = parseOutcomes(market.outcomes)
-
   return (
     <div className="market-row">
       <p className="market-row-question">{market.question}</p>
       <div className="market-row-outcomes">
-        {outcomes.map((label, i) => (
-          prices[i] !== undefined && (
-            <OutcomeBar key={label} label={label} price={prices[i]} />
-          )
+        {outcomes.map((label, i) => prices[i] !== undefined && (
+          <OutcomeBar key={label} label={label} price={prices[i]} />
         ))}
       </div>
       <div className="market-row-meta">
         <span className="stat vol">Vol {formatUSD(market.volume ?? 0)}</span>
         <span className="stat liq">Liq {formatUSD(market.liquidity ?? 0)}</span>
         <span className="stat date">Closes {formatDate(market.endDate)}</span>
-        <a
-          className="poly-link"
-          href={`https://polymarket.com/market/${market.slug}`}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          View on Polymarket ↗
+        <a className="poly-link" href={`https://polymarket.com/market/${market.slug}`} target="_blank" rel="noopener noreferrer">
+          Polymarket ↗
         </a>
       </div>
     </div>
   )
 }
 
-interface TraderRow {
-  address: string
-  pseudonym: string
-  name: string
-  tradeCount: number
-  volumeUSDC: number
-  lastSide: 'BUY' | 'SELL'
-  lastOutcome: string
-  lastPrice: number
-}
+// ── Smart Traders ────────────────────────────────────────────────────────────
 
-function buildTraderRows(trades: WalletTrade[]): TraderRow[] {
-  const map = new Map<string, TraderRow>()
-  for (const t of trades) {
-    const addr = t.proxyWallet
-    if (!map.has(addr)) {
-      map.set(addr, {
-        address: addr,
-        pseudonym: t.pseudonym || '',
-        name: t.name || '',
-        tradeCount: 0,
-        volumeUSDC: 0,
-        lastSide: t.side,
-        lastOutcome: t.outcome,
-        lastPrice: t.price,
-      })
-    }
-    const row = map.get(addr)!
-    row.tradeCount++
-    row.volumeUSDC += t.usdcSize ?? 0
-    if (t.timestamp >= (trades.find(x => x.proxyWallet === addr)?.timestamp ?? 0)) {
-      row.lastSide = t.side
-      row.lastOutcome = t.outcome
-      row.lastPrice = t.price
-    }
-  }
-  return Array.from(map.values()).sort((a, b) => b.volumeUSDC - a.volumeUSDC)
-}
+function SmartTraderCard({ entry, rank, onSelect }: {
+  entry: TraderRankEntry
+  rank: number
+  onSelect: () => void
+}) {
+  const display = entry.pseudonym || entry.name || truncateAddress(entry.address)
+  const edgeScore = entry.totalResolved >= 3 ? Math.round(entry.timingScore * 100) : null
+  const timingPct = (entry.timingScore * 100).toFixed(0)
 
-function TradersPanel({ event, onSelectWallet }: { event: PolyEvent; onSelectWallet: (a: string) => void }) {
-  const [trades, setTrades] = useState<WalletTrade[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [loaded, setLoaded] = useState(false)
-
-  const load = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const firstMarket = event.markets?.[0]
-      if (!firstMarket) throw new Error('No markets found')
-      let tokenIds: string[] = []
-      if (firstMarket.clobTokenIds) {
-        try { tokenIds = JSON.parse(firstMarket.clobTokenIds) } catch { /* ignore */ }
-      }
-      if (tokenIds.length === 0 && firstMarket.id) {
-        tokenIds = [String(firstMarket.id)]
-      }
-      const all = await Promise.all(tokenIds.map(id => getMarketTrades(id, 200)))
-      const merged = all.flat()
-      setTrades(filterNoise(merged, 1))
-      setLoaded(true)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load traders')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const rows = buildTraderRows(trades)
-
-  if (!loaded) {
-    return (
-      <div>
-        <button className="search-btn" onClick={load} disabled={loading}>
-          {loading ? 'Loading traders…' : 'Load recent traders'}
-        </button>
-        {error && <p className="error-msg" style={{ marginTop: 12 }}>{error}</p>}
-      </div>
-    )
-  }
+  let confLabel = 'Low'
+  let confCls = 'badge-orange'
+  if (entry.totalResolved >= 5 && entry.timingScore >= 0.6) { confLabel = 'High'; confCls = 'badge-green' }
+  else if (entry.totalResolved >= 3 && entry.timingScore >= 0.45) { confLabel = 'Medium'; confCls = 'badge-yellow' }
 
   return (
-    <div>
-      <div className="data-source-label" style={{ marginBottom: 12 }}>
-        Showing {rows.length} unique wallets from last 200 trades · Real data
+    <div className="trader-card">
+      <div className="trader-card-rank">#{rank}</div>
+      <div className="trader-card-body">
+        <div className="trader-card-top">
+          <span className="trader-card-name">{display}</span>
+          <div className="trader-card-badges">
+            <span className={`confidence-badge ${confCls}`}>{confLabel} confidence</span>
+            {edgeScore !== null && (
+              <span className="confidence-badge badge-green" style={{ background: 'none', border: '1px solid var(--border)' }}>
+                Edge {edgeScore}/100
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="trader-card-meta">
+          <span className="stat vol">{formatUSD(entry.totalVolumeUSDC)} vol</span>
+          <span className="stat date">{entry.tradeCount} trades</span>
+          {entry.winRate !== null && (
+            <span className={`stat ${entry.winRate >= 0.5 ? '' : 'pnl-neg'}`}>
+              {(entry.winRate * 100).toFixed(0)}% win
+            </span>
+          )}
+          {entry.pnl !== null && (
+            <span className={`stat ${entry.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
+              {entry.pnl >= 0 ? '+' : ''}{formatUSD(entry.pnl)} PnL
+            </span>
+          )}
+        </div>
+        {entry.totalResolved >= 3 && (
+          <div className="timing-bar-wrap">
+            <div className="timing-bar-track">
+              <div className="timing-bar-fill" style={{
+                width: `${timingPct}%`,
+                background: Number(timingPct) >= 55 ? '#22c55e' : '#f59e0b',
+              }} />
+            </div>
+            <span className="timing-bar-label">
+              {entry.positiveDelta}/{entry.totalResolved} favorable entries
+            </span>
+          </div>
+        )}
+        <div className="trader-card-actions">
+          <button className="search-btn" style={{ fontSize: '0.8rem', padding: '5px 14px' }} onClick={onSelect}>
+            View Profile →
+          </button>
+        </div>
       </div>
-      {rows.length === 0 && <p className="empty-msg">No traders found.</p>}
-      {rows.map(r => (
-        <button
-          key={r.address}
-          className="trader-row"
-          onClick={() => onSelectWallet(r.address)}
-        >
-          <div className="trader-row-top">
-            <span className="trader-name">{r.pseudonym || r.name || truncateAddress(r.address)}</span>
-            <span className="stat vol">{formatUSD(r.volumeUSDC)}</span>
-          </div>
-          <div className="trade-row-meta">
-            <span className="stat date">{r.tradeCount} trade{r.tradeCount !== 1 ? 's' : ''}</span>
-            <span className={`side-badge ${r.lastSide === 'BUY' ? 'buy' : 'sell'}`}>{r.lastSide}</span>
-            <span className="trade-outcome">{r.lastOutcome}</span>
-            <span className="stat prob">@ {((r.lastPrice ?? 0) * 100).toFixed(0)}¢</span>
-          </div>
-        </button>
-      ))}
     </div>
   )
 }
 
-type Tab = 'markets' | 'traders'
+// ── Best Trades ──────────────────────────────────────────────────────────────
+
+function BestTradeRow({ trade, onSelectWallet }: { trade: BestTrade; onSelectWallet: (a: string) => void }) {
+  const display = trade.pseudonym || trade.name || truncateAddress(trade.address)
+  const time = new Date(trade.timestamp * 1000).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  })
+  const multiple = trade.profitMultiple.toFixed(2)
+  const deltaSign = trade.delta >= 0 ? '+' : ''
+
+  return (
+    <div className="best-trade-row">
+      <div className="best-trade-top">
+        <span className={`side-badge ${trade.side === 'BUY' ? 'buy' : 'sell'}`}>{trade.side}</span>
+        <span className="trade-title">{trade.outcome} — {trade.title}</span>
+        <span className="best-trade-multiple pnl-pos">{multiple}x</span>
+      </div>
+      <div className="trade-row-meta">
+        <span className="stat prob">Entry {(trade.entryPrice * 100).toFixed(0)}¢</span>
+        <span className="stat prob">Now {(trade.currentPrice * 100).toFixed(0)}¢ <span className="estimate-label">(live)</span></span>
+        <span className="stat vol pnl-pos">{deltaSign}{(trade.delta * 100).toFixed(1)}¢ delta</span>
+        <span className="stat vol">{formatUSD(trade.sizeUSDC)}</span>
+        <span className="stat date">{time}</span>
+        <button className="follow-btn" onClick={() => onSelectWallet(trade.address)}>
+          {display} →
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
+
+type Tab = 'overview' | 'traders' | 'best-trades'
 
 export default function MarketDetail({ event, onBack, onSelectWallet }: Props) {
-  const [tab, setTab] = useState<Tab>('markets')
+  const [tab, setTab] = useState<Tab>('overview')
   const [watching, setWatching] = useState(() => isWatchingMarket(event.id))
-  const totalVol = event.markets?.reduce((s, m) => s + (m.volume ?? 0), 0) ?? event.volume ?? 0
-  const totalLiq = event.markets?.reduce((s, m) => s + (m.liquidity ?? 0), 0) ?? event.liquidity ?? 0
+  const [traders, setTraders] = useState<TraderRankEntry[]>([])
+  const [bestTrades, setBestTrades] = useState<BestTrade[]>([])
+  const [intelLoading, setIntelLoading] = useState(false)
+  const [intelError, setIntelError] = useState<string | null>(null)
+  const [intelLoaded, setIntelLoaded] = useState(false)
+
+  // Auto-load market intelligence on mount
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      setIntelLoading(true)
+      setIntelError(null)
+      try {
+        const { traders: ranked, bestTrades: best } = await rankTradersForMarket(event)
+        if (cancelled) return
+        setTraders(ranked)
+        setBestTrades(best)
+        setIntelLoaded(true)
+        // Enrich top 5 with PnL in background
+        if (ranked.length > 0) {
+          enrichWithPnL(ranked, 5).then(enriched => {
+            if (!cancelled) setTraders(enriched)
+          })
+        }
+      } catch (e) {
+        if (!cancelled) setIntelError(e instanceof Error ? e.message : 'Failed to load intelligence')
+      } finally {
+        if (!cancelled) setIntelLoading(false)
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [event.id])
 
   const handleToggleWatch = () => {
     if (watching) { unwatchMarket(event.id); setWatching(false) }
     else { watchMarket(event); setWatching(true) }
   }
 
+  const totalVol = (event.markets ?? []).reduce((s, m) => s + (m.volume ?? 0), 0) || event.volume || 0
+  const totalLiq = (event.markets ?? []).reduce((s, m) => s + (m.liquidity ?? 0), 0) || event.liquidity || 0
+
   return (
     <div className="detail-page">
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
         <button className="back-btn" onClick={onBack}>← Back</button>
-        <button
-          className={`back-btn ${watching ? 'watching-active' : ''}`}
-          onClick={handleToggleWatch}
-        >
-          {watching ? '★ Watching' : '☆ Watch market'}
+        <button className={`back-btn ${watching ? 'watching-active' : ''}`} onClick={handleToggleWatch}>
+          {watching ? '★ Watching' : '☆ Watch'}
         </button>
+        {intelLoading && (
+          <span className="score-loading-badge">Loading market intelligence…</span>
+        )}
       </div>
 
       <div className="detail-header">
-        {event.image && (
-          <img className="detail-img" src={event.image} alt="" />
-        )}
+        {event.image && <img className="detail-img" src={event.image} alt="" />}
         <div>
           <h2 className="detail-title">{event.title}</h2>
           <div className="detail-meta">
-            <span className="stat vol">Total vol {formatUSD(totalVol)}</span>
-            <span className="stat liq">Total liq {formatUSD(totalLiq)}</span>
-            <span className="stat date">Closes {formatDate(event.endDate)}</span>
-            <a
-              className="poly-link"
-              href={`https://polymarket.com/event/${event.slug}`}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Open on Polymarket ↗
+            <span className="stat vol">Vol {formatUSD(totalVol)}</span>
+            <span className="stat liq">Liq {formatUSD(totalLiq)}</span>
+            <span className="stat date">{timeRemaining(event.endDate)} left</span>
+            <a className="poly-link" href={`https://polymarket.com/event/${event.slug}`} target="_blank" rel="noopener noreferrer">
+              Polymarket ↗
             </a>
           </div>
         </div>
       </div>
 
       <div className="data-source-label">
-        Data source: <strong>Polymarket public API</strong> · Real market data
+        Polymarket public API · real data · traders auto-loaded from recent CLOB trades
       </div>
 
       <div className="tab-bar">
-        <button className={`tab-btn ${tab === 'markets' ? 'active' : ''}`} onClick={() => setTab('markets')}>
-          Markets ({event.markets?.length ?? 0})
+        <button className={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
+          Market Overview
         </button>
         <button className={`tab-btn ${tab === 'traders' ? 'active' : ''}`} onClick={() => setTab('traders')}>
-          Traders
+          Smart Traders {intelLoaded ? `(${traders.length})` : intelLoading ? '…' : ''}
+        </button>
+        <button className={`tab-btn ${tab === 'best-trades' ? 'active' : ''}`} onClick={() => setTab('best-trades')}>
+          Best Trades {intelLoaded ? `(${bestTrades.length})` : intelLoading ? '…' : ''}
         </button>
       </div>
 
-      {tab === 'markets' && (
-        <div className="markets-list">
-          {event.markets?.map(m => (
-            <MarketRow key={m.id} market={m} />
-          ))}
-          {(!event.markets || event.markets.length === 0) && (
-            <p className="empty-msg">No sub-markets available.</p>
+      {tab === 'overview' && <MarketOverview event={event} />}
+
+      {tab === 'traders' && (
+        <div className="trader-ranking-panel">
+          {intelError && <p className="error-msg">{intelError}</p>}
+          {intelLoading && <p className="empty-msg">Analyzing traders in this market…</p>}
+          {intelLoaded && traders.length === 0 && (
+            <p className="empty-msg">No traders with ≥2 trades found in this market yet.</p>
           )}
+          {traders.map((t, i) => (
+            <SmartTraderCard
+              key={t.address}
+              entry={t}
+              rank={i + 1}
+              onSelect={() => onSelectWallet(t.address)}
+            />
+          ))}
         </div>
       )}
 
-      {tab === 'traders' && (
-        <TradersPanel event={event} onSelectWallet={onSelectWallet} />
+      {tab === 'best-trades' && (
+        <div>
+          {intelError && <p className="error-msg">{intelError}</p>}
+          {intelLoading && <p className="empty-msg">Finding best entries in this market…</p>}
+          {intelLoaded && bestTrades.length === 0 && (
+            <p className="empty-msg">No favorable entries found yet (price may not have moved since trades).</p>
+          )}
+          {intelLoaded && bestTrades.length > 0 && (
+            <div className="data-source-label" style={{ marginBottom: 12 }}>
+              Entries where price has since moved in the trader's direction · current price = live CLOB last-trade
+            </div>
+          )}
+          {bestTrades.map((t, i) => (
+            <BestTradeRow key={i} trade={t} onSelectWallet={onSelectWallet} />
+          ))}
+        </div>
       )}
     </div>
   )
