@@ -1,73 +1,53 @@
-# React + TypeScript + Vite
+# EdgeWatch
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Polymarket intelligence dashboard — discover markets, identify early-signal wallets, and simulate following behavior.
 
-Currently, two official plugins are available:
+## What it does
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Market Discovery** — search Polymarket markets by keyword, see probability, volume, liquidity, close date
+- **Market Detail** — view outcome probability bars, sub-markets, and recent traders
+- **Wallet Intelligence** — inspect any wallet's full trade history, open positions, and PnL
+- **EdgeScore** — size-weighted CLV approximation + repeatability score with confidence level
+- **Paper Portfolio** — simulate following wallet trades with no real money, no wallet connection
+- **Watchlist** — watch wallets and markets; revisit from a central hub
 
-## React Compiler
+## What it does NOT do
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- No trading execution
+- No order placement
+- No wallet authentication or private keys
+- No financial advice
+- All "estimated" values are clearly labeled
 
-## Expanding the ESLint configuration
+## Run locally
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd edgewatch
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Open `http://localhost:5173`
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Build
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run build
 ```
+
+## Data sources
+
+| Data | Source | Label in UI |
+|------|--------|-------------|
+| Markets, events | Polymarket Gamma API (public) | Real |
+| Wallet trades | Polymarket Data API (public) | Real |
+| Wallet positions & PnL | Polymarket Data API (public) | Real |
+| EdgeScore, CLV | Derived from above | Estimated |
+| Paper portfolio | localStorage, no real funds | Simulated |
+
+## Stack
+
+- Vite + React 19 + TypeScript
+- No router dependency — state-based navigation
+- No external UI library — custom CSS with dark mode
+- localStorage for watchlist and paper portfolio persistence
