@@ -8,6 +8,8 @@ import {
   truncateAddress,
 } from '../api/wallets'
 import { formatUSD, formatDate } from '../api/polymarket'
+import { scoreWallet } from '../api/scoring'
+import EdgeScoreCard from './EdgeScoreCard'
 
 interface Props {
   address: string
@@ -91,6 +93,8 @@ export default function WalletProfile({ address, onBack }: Props) {
           <div className="data-source-label">
             Data source: <strong>Polymarket public activity API</strong> · Real trade history
           </div>
+
+          <EdgeScoreCard score={scoreWallet(filtered, positions)} />
 
           <div className="wallet-stats-row">
             <div className="wallet-stat">

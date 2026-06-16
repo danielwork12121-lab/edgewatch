@@ -57,10 +57,12 @@ export interface WalletPosition {
   conditionId: string
   size: number
   avgPrice: number
+  initialValue: number
   currentValue: number
   cashPnl: number
   percentPnl: number
   realizedPnl: number
+  curPrice: number
   title: string
   slug: string
   outcome: string

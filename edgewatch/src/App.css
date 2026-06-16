@@ -273,6 +273,89 @@
   background: var(--accent-bg);
 }
 
+/* ── EdgeScore card ── */
+.edge-score-card {
+  border: 1px solid var(--accent-border);
+  border-radius: 10px;
+  padding: 20px;
+  background: var(--accent-bg);
+  margin-bottom: 24px;
+}
+.edge-score-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.edge-score-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-h);
+  margin: 0;
+}
+.score-disclaimer {
+  font-size: 0.78rem;
+  color: var(--text);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+.score-rings {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+.score-ring-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.score-ring-label {
+  font-size: 0.75rem;
+  color: var(--text);
+}
+.score-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.score-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+  gap: 8px;
+}
+.score-detail-label { color: var(--text); }
+.score-detail-val { color: var(--text-h); font-weight: 500; }
+.estimate-label {
+  font-size: 0.7rem;
+  color: var(--text);
+  font-weight: 400;
+}
+.score-footnote {
+  font-size: 0.72rem;
+  color: var(--text);
+  line-height: 1.5;
+  margin: 0;
+  border-top: 1px solid var(--accent-border);
+  padding-top: 10px;
+}
+
+/* ── Confidence badges ── */
+.confidence-badge {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 100px;
+  font-weight: 600;
+}
+.badge-red    { background: #fee2e2; color: #b91c1c; }
+.badge-orange { background: #ffedd5; color: #c2410c; }
+.badge-yellow { background: #fef9c3; color: #854d0e; }
+.badge-green  { background: #dcfce7; color: #15803d; }
+
 /* ── Tabs ── */
 .tab-bar {
   display: flex;
