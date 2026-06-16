@@ -4,11 +4,10 @@ import {
   getWalletActivity,
   getWalletPositions,
   filterNoise,
-  groupTradesByMarket,
   truncateAddress,
 } from '../api/wallets'
 import { formatUSD, formatDate } from '../api/polymarket'
-import { scoreWallet } from '../api/scoring'
+import { computeEntryScore, type EdgeScore } from '../api/scoring'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
 import EdgeScoreCard from './EdgeScoreCard'
@@ -51,6 +50,8 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [minSize, setMinSize] = useState(1)
   const [followMsg, setFollowMsg] = useState<string | null>(null)
   const [watching, setWatching] = useState(() => isWatchingWallet(address))
+  const [score, setScore] = useState<EdgeScore | null>(null)
+  const [scoreLoading, setScoreLoading] = useState(false)
 
   const handleToggleWatch = () => {
     const pseudonym = trades[0]?.pseudonym ?? ''
@@ -78,6 +79,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   useEffect(() => {
     setLoading(true)
     setError(null)
+    setScore(null)
     Promise.all([
       getWalletActivity(address, 200),
       getWalletPositions(address, 50),
@@ -90,9 +92,19 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
       .finally(() => setLoading(false))
   }, [address])
 
+  // Compute entry-based score after trades load (async — fetches live prices)
+  useEffect(() => {
+    const noisy = filterNoise(trades, minSize)
+    if (noisy.length === 0) { setScore(null); return }
+    setScoreLoading(true)
+    computeEntryScore(noisy)
+      .then(setScore)
+      .catch(() => setScore(null))
+      .finally(() => setScoreLoading(false))
+  }, [address, minSize, trades.length])
+
   const filtered = filterNoise(trades, minSize)
-  const byMarket = groupTradesByMarket(filtered)
-  const marketCount = byMarket.size
+  const marketCount = new Set(filtered.map(t => t.conditionId)).size
   const totalVol = filtered.reduce((s, t) => s + (t.usdcSize ?? 0), 0)
   const pseudonym = trades[0]?.pseudonym || ''
   const name = trades[0]?.name || ''
@@ -141,7 +153,14 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             Data source: <strong>Polymarket public activity API</strong> · Real trade history
           </div>
 
-          <EdgeScoreCard score={scoreWallet(filtered, positions)} />
+          {(score || scoreLoading) && (
+            <EdgeScoreCard score={score ?? {
+              overall: 0, entryEdgeScore: 0, repeatabilityScore: 0,
+              sampleConfidence: 'very_low', sampleSize: 0, pricesResolved: 0,
+              marketsTraded: 0, totalVolumeUSDC: 0, avgDeltaCents: 0,
+              breakdown: { positiveDeltaTrades: 0, negativeDeltaTrades: 0, unresolvedTrades: 0 }
+            }} loading={scoreLoading} />
+          )}
 
           <div className="wallet-stats-row">
             <div className="wallet-stat">

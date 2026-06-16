@@ -4,6 +4,7 @@ import {
   createPortfolio,
   clearPortfolio,
   computePortfolioSummary,
+  refreshPortfolioPrices,
   type PaperPortfolio as Portfolio,
   type SimulatedTrade,
 } from '../api/simulation'
@@ -16,9 +17,14 @@ interface Props {
 function TradeCard({ trade }: { trade: SimulatedTrade }) {
   const isBuy = trade.originalTrade.side === 'BUY'
   const pnlPos = trade.unrealizedPnlUSDC >= 0
-  const entryDate = new Date(trade.simulatedAt).toLocaleDateString('en-US', {
+  const entryDate = new Date(trade.simulatedAt).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   })
+  const refreshed = trade.lastRefreshedAt
+    ? new Date(trade.lastRefreshedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    : null
+  const priceChanged = trade.currentPrice !== trade.entryPrice
+
   return (
     <div className="sim-trade-card">
       <div className="trade-row-top">
@@ -31,12 +37,20 @@ function TradeCard({ trade }: { trade: SimulatedTrade }) {
       <div className="trade-row-meta">
         <span className="trade-outcome">{trade.originalTrade.outcome}</span>
         <span className="stat vol">Paper: {formatUSD(trade.simulatedSizeUSDC)}</span>
-        <span className="stat prob">Entry @ {(trade.entryPrice * 100).toFixed(0)}¢</span>
-        <span className="stat prob">Now @ {(trade.currentPrice * 100).toFixed(0)}¢ <span className="estimate-label">(estimated)</span></span>
+        <span className="stat prob">Entry @ {(trade.entryPrice * 100).toFixed(1)}¢ <span className="estimate-label">(real)</span></span>
+        <span className={`stat prob ${priceChanged ? (pnlPos ? 'price-up' : 'price-down') : ''}`}>
+          Now @ {(trade.currentPrice * 100).toFixed(1)}¢
+          {refreshed
+            ? <span className="estimate-label"> (live, {refreshed})</span>
+            : <span className="estimate-label"> (not refreshed)</span>
+          }
+        </span>
         <span className="stat date">{entryDate}</span>
       </div>
       <div className="sim-value-row">
-        <span className="stat vol">Est. value: {formatUSD(trade.estimatedValue)} <span className="estimate-label">(simulated)</span></span>
+        <span className="stat vol">
+          Est. value: {formatUSD(trade.estimatedValue)} <span className="estimate-label">(simulated)</span>
+        </span>
       </div>
     </div>
   )
@@ -46,6 +60,7 @@ export default function PaperPortfolioPage({ onBack }: Props) {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
   const [balance, setBalance] = useState('1000')
   const [showSetup, setShowSetup] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     const p = loadPortfolio()
@@ -66,6 +81,17 @@ export default function PaperPortfolioPage({ onBack }: Props) {
     clearPortfolio()
     setPortfolio(null)
     setShowSetup(true)
+  }
+
+  const handleRefresh = async () => {
+    if (!portfolio || refreshing) return
+    setRefreshing(true)
+    try {
+      const updated = await refreshPortfolioPrices(portfolio)
+      setPortfolio(updated)
+    } finally {
+      setRefreshing(false)
+    }
   }
 
   if (showSetup || !portfolio) {
@@ -101,6 +127,9 @@ export default function PaperPortfolioPage({ onBack }: Props) {
 
   const summary = computePortfolioSummary(portfolio)
   const pnlPos = summary.totalPnl >= 0
+  const lastRefreshTime = summary.lastRefreshedAt
+    ? new Date(summary.lastRefreshedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    : null
 
   return (
     <div className="detail-page">
@@ -116,13 +145,14 @@ export default function PaperPortfolioPage({ onBack }: Props) {
       </div>
 
       <div className="data-source-label">
-        <strong>Simulated paper portfolio</strong> · No real money · No wallet connection
+        <strong>Simulated paper portfolio</strong> · No real money · No wallet connection ·
+        PnL uses live CLOB prices after refresh
       </div>
 
       <div className="wallet-stats-row">
         <div className="wallet-stat">
           <span className="wallet-stat-val">{formatUSD(portfolio.startingBalance)}</span>
-          <span className="wallet-stat-label">Starting Balance</span>
+          <span className="wallet-stat-label">Starting</span>
         </div>
         <div className="wallet-stat">
           <span className="wallet-stat-val">{formatUSD(summary.totalInvested)}</span>
@@ -136,7 +166,7 @@ export default function PaperPortfolioPage({ onBack }: Props) {
           <span className={`wallet-stat-val ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>
             {pnlPos ? '+' : ''}{formatUSD(summary.totalPnl)}
           </span>
-          <span className="wallet-stat-label">Est. PnL <span className="estimate-label">(sim)</span></span>
+          <span className="wallet-stat-label">Mark-to-Market PnL</span>
         </div>
         <div className="wallet-stat">
           <span className={`wallet-stat-val ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>
@@ -146,23 +176,39 @@ export default function PaperPortfolioPage({ onBack }: Props) {
         </div>
       </div>
 
-      <p className="score-footnote" style={{ marginBottom: 24 }}>
-        All values are simulated estimates using entry price at time of "follow". Current prices
-        reflect the entry price (no live refresh). PnL is estimated, not real.
+      <p className="score-footnote" style={{ marginBottom: 16 }}>
+        Mark-to-market PnL = (current CLOB price × shares) − invested.
+        Entry prices are real (from the trade you followed). Current prices are fetched live on refresh.
+        Values are simulated — no real funds involved.
       </p>
 
       <div className="section-header" style={{ marginBottom: 12 }}>
         <h3 className="markets-list-title">
           Open Positions ({summary.openPositions})
+          {lastRefreshTime && (
+            <span className="estimate-label" style={{ fontWeight: 400, marginLeft: 8 }}>
+              · prices as of {lastRefreshTime}
+            </span>
+          )}
         </h3>
-        <button className="back-btn" style={{ fontSize: '0.8rem' }} onClick={handleClear}>
-          Reset portfolio
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="search-btn"
+            style={{ fontSize: '0.8rem', padding: '5px 12px' }}
+            onClick={handleRefresh}
+            disabled={refreshing || summary.openPositions === 0}
+          >
+            {refreshing ? 'Refreshing…' : '↻ Refresh prices'}
+          </button>
+          <button className="back-btn" style={{ fontSize: '0.8rem' }} onClick={handleClear}>
+            Reset
+          </button>
+        </div>
       </div>
 
       {portfolio.trades.length === 0 && (
         <p className="empty-msg">
-          No simulated trades yet. Browse markets → Traders → open a wallet and click "Follow trade (paper)".
+          No simulated trades yet. Browse markets → Traders → open a wallet and click "+ Paper follow".
         </p>
       )}
 

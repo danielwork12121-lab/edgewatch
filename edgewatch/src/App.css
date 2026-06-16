@@ -406,6 +406,20 @@
   color: var(--text);
   font-weight: 400;
 }
+.score-loading-badge {
+  font-size: 0.72rem;
+  color: var(--accent);
+  padding: 2px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: 100px;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.price-up { color: #22c55e !important; }
+.price-down { color: #ef4444 !important; }
 .score-footnote {
   font-size: 0.72rem;
   color: var(--text);

@@ -1,16 +1,18 @@
 import type { WalletTrade } from '../types'
+import { batchFetchPrices } from './priceTracker'
 
 export interface SimulatedTrade {
   originalTrade: WalletTrade
-  simulatedSizeUSDC: number   // user's paper allocation
+  simulatedSizeUSDC: number
   simulatedShares: number
-  entryPrice: number
-  currentPrice: number        // last known price
-  estimatedValue: number      // simulatedShares * currentPrice
-  unrealizedPnlUSDC: number
+  entryPrice: number            // snapshot at time of follow — never mutated
+  currentPrice: number          // updated by refreshPortfolioPrices()
+  estimatedValue: number        // simulatedShares × currentPrice
+  unrealizedPnlUSDC: number     // estimatedValue - simulatedSizeUSDC
   unrealizedPnlPct: number
   status: 'open' | 'closed' | 'expired'
-  simulatedAt: number         // timestamp when user "followed"
+  simulatedAt: number
+  lastRefreshedAt: number | null
 }
 
 export interface PaperPortfolio {
@@ -59,19 +61,20 @@ export function addSimulatedTrade(
     simulatedSizeUSDC: sizeUSDC,
     simulatedShares: shares,
     entryPrice,
-    currentPrice: entryPrice, // will be updated when refreshed
+    currentPrice: entryPrice,
     estimatedValue: sizeUSDC,
     unrealizedPnlUSDC: 0,
     unrealizedPnlPct: 0,
     status: 'open',
     simulatedAt: Date.now(),
+    lastRefreshedAt: null,
   }
   const updated = { ...portfolio, trades: [simTrade, ...portfolio.trades] }
   savePortfolio(updated)
   return updated
 }
 
-export function updateTradePrice(trade: SimulatedTrade, newPrice: number): SimulatedTrade {
+export function applyPriceToTrade(trade: SimulatedTrade, newPrice: number): SimulatedTrade {
   const value = trade.simulatedShares * newPrice
   const pnl = value - trade.simulatedSizeUSDC
   const pct = trade.simulatedSizeUSDC > 0 ? (pnl / trade.simulatedSizeUSDC) * 100 : 0
@@ -81,8 +84,29 @@ export function updateTradePrice(trade: SimulatedTrade, newPrice: number): Simul
     estimatedValue: value,
     unrealizedPnlUSDC: pnl,
     unrealizedPnlPct: pct,
-    status: trade.status,
+    lastRefreshedAt: Date.now(),
   }
+}
+
+// Fetch live CLOB prices for all open positions and recompute mark-to-market PnL.
+// Uses the originalTrade.asset (CLOB token ID for the specific outcome).
+export async function refreshPortfolioPrices(portfolio: PaperPortfolio): Promise<PaperPortfolio> {
+  const open = portfolio.trades.filter(t => t.status === 'open')
+  if (open.length === 0) return portfolio
+
+  const tokenIds = open.map(t => t.originalTrade.asset).filter(Boolean)
+  const priceMap = await batchFetchPrices(tokenIds)
+
+  const updatedTrades = portfolio.trades.map(t => {
+    if (t.status !== 'open') return t
+    const newPrice = priceMap.get(t.originalTrade.asset)
+    if (newPrice === undefined) return t
+    return applyPriceToTrade(t, newPrice)
+  })
+
+  const updated = { ...portfolio, trades: updatedTrades }
+  savePortfolio(updated)
+  return updated
 }
 
 export function computePortfolioSummary(portfolio: PaperPortfolio) {
@@ -91,6 +115,7 @@ export function computePortfolioSummary(portfolio: PaperPortfolio) {
   const totalValue = open.reduce((s, t) => s + t.estimatedValue, 0)
   const totalPnl = totalValue - totalInvested
   const pnlPct = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0
+  const lastRefresh = open.reduce((latest, t) => Math.max(latest, t.lastRefreshedAt ?? 0), 0)
 
   return {
     openPositions: open.length,
@@ -99,6 +124,7 @@ export function computePortfolioSummary(portfolio: PaperPortfolio) {
     totalPnl,
     pnlPct,
     remainingBalance: portfolio.startingBalance - totalInvested,
+    lastRefreshedAt: lastRefresh || null,
   }
 }
 

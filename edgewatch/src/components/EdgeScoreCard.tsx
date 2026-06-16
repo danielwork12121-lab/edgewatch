@@ -4,6 +4,7 @@ import { formatUSD } from '../api/polymarket'
 
 interface Props {
   score: EdgeScore
+  loading?: boolean
 }
 
 function ScoreRing({ value, label }: { value: number; label: string }) {
@@ -37,70 +38,64 @@ function ScoreRing({ value, label }: { value: number; label: string }) {
 }
 
 function ConfidenceBadge({ level }: { level: EdgeScore['sampleConfidence'] }) {
-  const colors = {
-    very_low: 'badge-red',
-    low: 'badge-orange',
-    medium: 'badge-yellow',
-    high: 'badge-green',
-  }
-  return (
-    <span className={`confidence-badge ${colors[level]}`}>
-      {confidenceLabel(level)}
-    </span>
-  )
+  const colors = { very_low: 'badge-red', low: 'badge-orange', medium: 'badge-yellow', high: 'badge-green' }
+  return <span className={`confidence-badge ${colors[level]}`}>{confidenceLabel(level)}</span>
 }
 
-export default function EdgeScoreCard({ score }: Props) {
-  const { breakdown } = score
-  const edgeDir = score.estimatedEdge >= 0 ? '+' : ''
+export default function EdgeScoreCard({ score, loading }: Props) {
+  const deltaSign = score.avgDeltaCents >= 0 ? '+' : ''
+  const resolved = score.pricesResolved
+  const total = score.sampleSize
+  const coveragePct = total > 0 ? Math.round((resolved / total) * 100) : 0
 
   return (
     <div className="edge-score-card">
       <div className="edge-score-header">
         <h3 className="edge-score-title">EdgeScore</h3>
         <ConfidenceBadge level={score.sampleConfidence} />
+        {loading && <span className="score-loading-badge">Fetching live prices…</span>}
       </div>
 
       <div className="score-disclaimer">
-        Estimated signal strength based on {score.sampleSize} trades across {score.marketsTraded} markets.
+        Entry-based edge: measures whether market price moved in this wallet's direction
+        after each trade entry. Size-weighted across {score.sampleSize} trades / {score.marketsTraded} markets.
         <br />
-        <strong>Not financial advice. Estimated, not guaranteed.</strong>
+        <strong>Not financial advice. Estimated signal only.</strong>
       </div>
 
       <div className="score-rings">
         <ScoreRing value={score.overall} label="Overall" />
-        <ScoreRing value={score.clvScore} label="CLV Score" />
+        <ScoreRing value={score.entryEdgeScore} label="Entry Edge" />
         <ScoreRing value={score.repeatabilityScore} label="Repeatability" />
       </div>
 
       <div className="score-details">
         <div className="score-detail-row">
-          <span className="score-detail-label">Estimated Edge</span>
-          <span className={`score-detail-val ${score.estimatedEdge >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
-            {edgeDir}{score.estimatedEdge.toFixed(1)}¢ avg price move after entry
+          <span className="score-detail-label">Avg delta after entry</span>
+          <span className={`score-detail-val ${score.avgDeltaCents >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
+            {deltaSign}{score.avgDeltaCents.toFixed(1)}¢ <span className="estimate-label">(estimated)</span>
           </span>
         </div>
         <div className="score-detail-row">
-          <span className="score-detail-label">Total Volume</span>
-          <span className="score-detail-val">{formatUSD(score.totalVolumeUSDC)} <span className="estimate-label">(real)</span></span>
-        </div>
-        <div className="score-detail-row">
-          <span className="score-detail-label">Realized PnL</span>
-          <span className={`score-detail-val ${breakdown.realizedPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
-            {breakdown.realizedPnl >= 0 ? '+' : ''}{formatUSD(breakdown.realizedPnl)} <span className="estimate-label">(real)</span>
-          </span>
-        </div>
-        <div className="score-detail-row">
-          <span className="score-detail-label">Open Value</span>
-          <span className="score-detail-val">{formatUSD(breakdown.unrealizedPnl)} <span className="estimate-label">(estimated)</span></span>
-        </div>
-        <div className="score-detail-row">
-          <span className="score-detail-label">Positions Won / Lost</span>
+          <span className="score-detail-label">Trades with live price</span>
           <span className="score-detail-val">
-            <span className="pnl-pos">{breakdown.winningPositions}W</span>
-            {' / '}
-            <span className="pnl-neg">{breakdown.losingPositions}L</span>
+            {resolved} / {total} ({coveragePct}%) <span className="estimate-label">(real)</span>
           </span>
+        </div>
+        <div className="score-detail-row">
+          <span className="score-detail-label">Favorable / Unfavorable</span>
+          <span className="score-detail-val">
+            <span className="pnl-pos">{score.breakdown.positiveDeltaTrades}↑</span>
+            {' / '}
+            <span className="pnl-neg">{score.breakdown.negativeDeltaTrades}↓</span>
+            {score.breakdown.unresolvedTrades > 0 && (
+              <span className="estimate-label"> ({score.breakdown.unresolvedTrades} no price)</span>
+            )}
+          </span>
+        </div>
+        <div className="score-detail-row">
+          <span className="score-detail-label">Total volume</span>
+          <span className="score-detail-val">{formatUSD(score.totalVolumeUSDC)} <span className="estimate-label">(real)</span></span>
         </div>
         <div className="score-detail-row">
           <span className="score-detail-label">Confidence</span>
@@ -109,9 +104,10 @@ export default function EdgeScoreCard({ score }: Props) {
       </div>
 
       <p className="score-footnote">
-        CLV Score: measures if price moved in wallet's favor after entry (estimated from positions).
-        Repeatability: rewards wallets active across many markets, not one-off bets.
-        Low confidence scores should be treated as noise.
+        Entry Edge: (currentPrice − entryPrice) × sizeUSDC per trade, normalized.
+        Current price = latest CLOB trade for the specific outcome token.
+        Repeatability: rewards wallets active across many markets with multiple entries each.
+        Score is meaningless at very_low confidence — fewer than 5 trades.
       </p>
     </div>
   )

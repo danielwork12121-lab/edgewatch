@@ -1,102 +1,92 @@
-import type { WalletTrade, WalletPosition } from '../types'
+import type { WalletTrade } from '../types'
+import { batchFetchPrices } from './priceTracker'
 
 export interface EdgeScore {
-  overall: number          // 0-100
-  clvScore: number         // 0-100: size-weighted CLV vs market
-  repeatabilityScore: number // 0-100: consistency across markets
+  overall: number
+  entryEdgeScore: number        // 0-100: size-weighted entry-to-now delta
+  repeatabilityScore: number    // 0-100: breadth × depth across markets
   sampleConfidence: 'very_low' | 'low' | 'medium' | 'high'
   sampleSize: number
+  pricesResolved: number        // how many trades had a live current price
   marketsTraded: number
   totalVolumeUSDC: number
-  estimatedEdge: number    // % edge approximation
-  breakdown: ScoreBreakdown
+  avgDeltaCents: number         // avg (currentPrice - entryPrice) × 100 in wallet's favor
+  breakdown: {
+    positiveDeltaTrades: number // trades where price moved in wallet's direction
+    negativeDeltaTrades: number
+    unresolvedTrades: number    // trades with no live price available
+  }
 }
 
-export interface ScoreBreakdown {
-  winningPositions: number
-  losingPositions: number
-  unrealizedPnl: number
-  realizedPnl: number
-  avgEntryVsCurrentDelta: number // how much price moved in wallet's favor after entry
-  largeTradeAccuracy: number | null // accuracy on trades > $50
-}
-
-export function scoreWallet(
-  trades: WalletTrade[],
-  positions: WalletPosition[],
-): EdgeScore {
+// Compute entry-based edge score.
+// Formula:
+//   For each trade:
+//     delta = (currentPrice - entryPrice)  if BUY
+//           = (entryPrice - currentPrice)  if SELL
+//     weightedDelta += delta × usdcSize
+//   avgDelta = weightedDelta / totalUSDC
+//   entryEdgeScore = clamp((avgDelta + 0.3) / 0.6 × 100, 0, 100)
+//   overall = entryEdgeScore × 0.6 + repeatabilityScore × 0.4
+//
+// currentPrice = last CLOB trade for the specific outcome token (live fetch).
+// This measures whether price confirmed the direction after the wallet entered.
+export async function computeEntryScore(trades: WalletTrade[]): Promise<EdgeScore> {
   const sampleSize = trades.length
-  const sampleConfidence = getSampleConfidence(sampleSize)
-
   const uniqueMarkets = new Set(trades.map(t => t.conditionId)).size
   const totalVol = trades.reduce((s, t) => s + (t.usdcSize ?? 0), 0)
 
-  // CLV approximation: for open positions, measure (curPrice - avgPrice) * size
-  // Positive = moved in wallet's favor after entry
-  let weightedCLV = 0
+  const priceMap = await batchFetchPrices(trades.map(t => t.asset))
+
+  let weightedDelta = 0
   let totalWeight = 0
-  let winningPos = 0
-  let losingPos = 0
-  let unrealizedPnl = 0
-  let realizedPnl = 0
+  let pricesResolved = 0
+  let positiveDeltaTrades = 0
+  let negativeDeltaTrades = 0
+  let unresolvedTrades = 0
 
-  for (const pos of positions) {
-    const initialVal = pos.initialValue ?? (pos.avgPrice * pos.size)
-    if (!initialVal || initialVal <= 0) continue
+  for (const trade of trades) {
+    const currentPrice = priceMap.get(trade.asset)
+    const entryPrice = trade.price ?? 0
 
-    const clv = (pos.curPrice ?? 0) - (pos.avgPrice ?? 0)
-    const weight = initialVal
-    weightedCLV += clv * weight
+    if (currentPrice === undefined || entryPrice <= 0) {
+      unresolvedTrades++
+      continue
+    }
+
+    const delta = trade.side === 'BUY'
+      ? currentPrice - entryPrice
+      : entryPrice - currentPrice
+
+    const weight = trade.usdcSize ?? 0
+    weightedDelta += delta * weight
     totalWeight += weight
+    pricesResolved++
 
-    if ((pos.cashPnl ?? 0) >= 0) winningPos++
-    else losingPos++
-
-    unrealizedPnl += pos.currentValue ?? 0
-    realizedPnl += pos.realizedPnl ?? 0
+    if (delta > 0) positiveDeltaTrades++
+    else negativeDeltaTrades++
   }
 
-  const avgCLV = totalWeight > 0 ? weightedCLV / totalWeight : 0
+  const avgDelta = totalWeight > 0 ? weightedDelta / totalWeight : 0
+  const avgDeltaCents = avgDelta * 100
 
-  // CLV score: map avgCLV from [-0.3, +0.3] to [0, 100]
-  // +0.3 = excellent edge, -0.3 = consistently wrong
-  const clvScore = Math.min(100, Math.max(0, (avgCLV + 0.3) / 0.6 * 100))
-
-  // Repeatability: reward wallets that trade many unique markets consistently
+  const entryEdgeScore = Math.min(100, Math.max(0, (avgDelta + 0.3) / 0.6 * 100))
   const repeatabilityScore = computeRepeatabilityScore(uniqueMarkets, sampleSize)
-
-  // Large trade accuracy: accuracy on trades ≥ $50
-  const largeTrades = trades.filter(t => (t.usdcSize ?? 0) >= 50)
-  const largeTradeAccuracy = largeTrades.length >= 3
-    ? null // can't determine without resolution data from simple API
-    : null
-
-  // Estimated edge: CLV mapped to percentage
-  const estimatedEdge = avgCLV * 100
-
-  // Liquidity adjustment: if trading very small markets, lower confidence
-  // (applied to overall but not individual scores)
-  const liquidityMultiplier = 1.0 // can extend when liquidity data is joined
-
-  const raw = clvScore * 0.6 + repeatabilityScore * 0.4
-  const overall = Math.min(100, Math.max(0, raw * liquidityMultiplier))
+  const overall = Math.min(100, Math.max(0, entryEdgeScore * 0.6 + repeatabilityScore * 0.4))
 
   return {
     overall: Math.round(overall),
-    clvScore: Math.round(clvScore),
+    entryEdgeScore: Math.round(entryEdgeScore),
     repeatabilityScore: Math.round(repeatabilityScore),
-    sampleConfidence,
+    sampleConfidence: getSampleConfidence(sampleSize),
     sampleSize,
+    pricesResolved,
     marketsTraded: uniqueMarkets,
     totalVolumeUSDC: totalVol,
-    estimatedEdge,
+    avgDeltaCents,
     breakdown: {
-      winningPositions: winningPos,
-      losingPositions: losingPos,
-      unrealizedPnl,
-      realizedPnl,
-      avgEntryVsCurrentDelta: avgCLV,
-      largeTradeAccuracy,
+      positiveDeltaTrades,
+      negativeDeltaTrades,
+      unresolvedTrades,
     },
   }
 }
@@ -110,41 +100,20 @@ function getSampleConfidence(n: number): EdgeScore['sampleConfidence'] {
 
 function computeRepeatabilityScore(uniqueMarkets: number, totalTrades: number): number {
   if (totalTrades < 3) return 0
-  // Reward breadth (many markets) and depth (multiple trades per market)
   const breadthScore = Math.min(100, (uniqueMarkets / 10) * 100)
   const depthRatio = totalTrades / Math.max(uniqueMarkets, 1)
-  // Ideal: 2-5 trades per market — not a one-trade wonder, not spamming
   const depthScore = depthRatio >= 2 && depthRatio <= 10
     ? 80
     : depthRatio < 2
-      ? depthRatio * 40   // penalize single-trade-per-market behavior
+      ? depthRatio * 40
       : Math.max(0, 80 - (depthRatio - 10) * 5)
-  return (breadthScore * 0.5 + depthScore * 0.5)
-}
-
-export function detectEarlyEntry(
-  trade: WalletTrade,
-  marketCurrentPrice: number,
-): { isEarly: boolean; priceDelta: number; direction: 'favorable' | 'unfavorable' | 'neutral' } {
-  const entryPrice = trade.price ?? 0
-  const delta = marketCurrentPrice - entryPrice
-  const threshold = 0.05 // 5 cent move = significant
-  const isBuy = trade.side === 'BUY'
-
-  const favorable = isBuy ? delta > threshold : delta < -threshold
-  const unfavorable = isBuy ? delta < -threshold : delta > threshold
-
-  return {
-    isEarly: Math.abs(delta) > threshold,
-    priceDelta: delta,
-    direction: favorable ? 'favorable' : unfavorable ? 'unfavorable' : 'neutral',
-  }
+  return breadthScore * 0.5 + depthScore * 0.5
 }
 
 const CONFIDENCE_LABEL: Record<EdgeScore['sampleConfidence'], string> = {
   very_low: 'Very Low (< 5 trades)',
-  low: 'Low (5-20 trades)',
-  medium: 'Medium (20-50 trades)',
+  low: 'Low (5–20 trades)',
+  medium: 'Medium (20–50 trades)',
   high: 'High (50+ trades)',
 }
 
