@@ -24,7 +24,7 @@ export default function App() {
       <WatchlistPage
         onBack={() => setView(view.from ?? { page: 'search' })}
         onSelectWallet={address => setView({ page: 'wallet', address, from: view })}
-        onSelectMarket={_id => goSearch()} // market lookup from watchlist: go to search for now
+        onSelectMarket={_id => goSearch()}
       />
     )
   }
@@ -62,6 +62,7 @@ export default function App() {
   return (
     <MarketSearch
       onSelectEvent={event => setView({ page: 'detail', event })}
+      onSelectWallet={address => setView({ page: 'wallet', address, from: view })}
       onViewWatchlist={() => setView({ page: 'watchlist', from: view })}
       onViewPortfolio={() => setView({ page: 'portfolio', from: view })}
     />

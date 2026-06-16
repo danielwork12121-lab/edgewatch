@@ -23,11 +23,34 @@ export interface PolyEvent {
   startDate: string
   endDate: string | null
   image: string | null
+  icon: string | null
   active: boolean
   closed: boolean
   volume: number
+  volume24hr: number
   liquidity: number
   markets: PolyMarket[]
+  tags?: Array<{ id: string; slug: string; label: string }>
+}
+
+export interface TraderRankEntry {
+  address: string
+  pseudonym: string
+  name: string
+  tradeCount: number
+  totalVolumeUSDC: number
+  avgTradeSize: number
+  timingScore: number        // % of trades where price moved in wallet's direction
+  positiveDelta: number
+  totalResolved: number
+  pnl: number | null         // null until positions fetched
+  winRate: number | null
+  marketsTraded: number
+}
+
+export interface PricePoint {
+  t: number   // unix timestamp
+  p: number   // price 0-1
 }
 
 export interface WalletTrade {

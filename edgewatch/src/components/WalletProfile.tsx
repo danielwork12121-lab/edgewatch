@@ -8,9 +8,11 @@ import {
 } from '../api/wallets'
 import { formatUSD, formatDate } from '../api/polymarket'
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
+import { computeCopySignal } from '../api/priceHistory'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
 import EdgeScoreCard from './EdgeScoreCard'
+import PriceChart from './PriceChart'
 
 interface Props {
   address: string
@@ -18,19 +20,56 @@ interface Props {
   onViewPortfolio?: () => void
 }
 
-function TradeRow({ trade, onFollow }: { trade: WalletTrade; onFollow: (t: WalletTrade) => void }) {
+function TradeRow({
+  trade,
+  score,
+  onFollow,
+  allTradesForMarket,
+}: {
+  trade: WalletTrade
+  score: EdgeScore | null
+  onFollow: (t: WalletTrade) => void
+  allTradesForMarket: WalletTrade[]
+}) {
+  const [expanded, setExpanded] = useState(false)
   const isBuy = trade.side === 'BUY'
   const time = new Date(trade.timestamp * 1000).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   })
+
+  // Copy signal (uses EdgeScore data + trade size)
+  const copySignal = score
+    ? computeCopySignal(score.overall, score.entryEdgeScore / 100, 50_000, trade.usdcSize ?? 0)
+    : null
+
+  // Get CLOB token ID for chart (outcome-specific)
+  let tokenId = trade.asset ?? ''
+  if (!tokenId) {
+    try {
+      const ids = JSON.parse('')
+      tokenId = ids[0] ?? ''
+    } catch { /* no token */ }
+  }
+
   return (
     <div className="trade-row">
       <div className="trade-row-top">
         <span className={`side-badge ${isBuy ? 'buy' : 'sell'}`}>{trade.side}</span>
         <span className="trade-title">{trade.title}</span>
-        <button className="follow-btn" onClick={() => onFollow(trade)}>
-          + Paper follow
-        </button>
+        <div style={{ display: 'flex', gap: 6, marginLeft: 'auto', flexShrink: 0 }}>
+          {copySignal && (
+            <span className={`copy-signal-badge signal-${copySignal.label.toLowerCase()}`}>
+              {copySignal.label} · {copySignal.allocationPct.toFixed(1)}% alloc
+            </span>
+          )}
+          <button className="follow-btn" onClick={() => onFollow(trade)}>+ Follow</button>
+          {tokenId && (
+            <button className="follow-btn" style={{ background: 'none', borderColor: 'var(--border)' }}
+              onClick={() => setExpanded(e => !e)}>
+              {expanded ? '▲ Chart' : '▼ Chart'}
+            </button>
+          )}
+        </div>
       </div>
       <div className="trade-row-meta">
         <span className="trade-outcome">{trade.outcome}</span>
@@ -38,6 +77,15 @@ function TradeRow({ trade, onFollow }: { trade: WalletTrade; onFollow: (t: Walle
         <span className="stat prob">@ {((trade.price ?? 0) * 100).toFixed(0)}¢</span>
         <span className="stat date">{time}</span>
       </div>
+      {expanded && tokenId && (
+        <div style={{ marginTop: 12 }}>
+          <PriceChart
+            tokenId={tokenId}
+            trades={allTradesForMarket}
+            title={`${trade.outcome} — ${trade.title}`}
+          />
+        </div>
+      )}
     </div>
   )
 }
@@ -231,9 +279,18 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             {filtered.length === 0 && (
               <p className="empty-msg">No trades above the size filter.</p>
             )}
-            {filtered.slice(0, 100).map((t, i) => (
-              <TradeRow key={`${t.transactionHash ?? i}`} trade={t} onFollow={handleFollow} />
-            ))}
+            {filtered.slice(0, 100).map((t, i) => {
+              const marketTrades = filtered.filter(x => x.conditionId === t.conditionId)
+              return (
+                <TradeRow
+                  key={`${t.transactionHash ?? i}`}
+                  trade={t}
+                  score={score}
+                  onFollow={handleFollow}
+                  allTradesForMarket={marketTrades}
+                />
+              )
+            })}
             {filtered.length > 100 && (
               <p className="empty-msg">Showing first 100 of {filtered.length} trades.</p>
             )}

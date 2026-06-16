@@ -23,6 +23,195 @@
   font-size: 0.9rem;
 }
 
+/* ── App header ── */
+.app-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+/* ── Category bar ── */
+.category-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.category-pill {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  background: none;
+  color: var(--text-h);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.category-pill:hover { background: var(--code-bg); }
+.category-pill.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.category-emoji { font-size: 0.95rem; }
+
+/* ── Section heading ── */
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.section-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0;
+}
+.data-badge {
+  font-size: 0.72rem;
+  color: var(--text);
+  background: var(--code-bg);
+  padding: 2px 8px;
+  border-radius: 100px;
+}
+
+/* ── Volatility badge ── */
+.vol-high { background: #fee2e2 !important; color: #b91c1c !important; }
+.vol-med  { background: #fef9c3 !important; color: #92400e !important; }
+.vol-low  { background: #dcfce7 !important; color: #166534 !important; }
+
+/* ── Trader ranking ── */
+.trader-ranking-panel { margin-top: 8px; }
+.ranking-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.trader-card {
+  display: flex;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 10px;
+  align-items: flex-start;
+}
+.trader-card-rank {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--accent);
+  min-width: 28px;
+  text-align: center;
+  padding-top: 2px;
+}
+.trader-card-body { flex: 1; min-width: 0; }
+.trader-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.trader-card-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-h);
+}
+.trader-card-badges { display: flex; gap: 6px; }
+.trader-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.trader-card-actions { margin-top: 10px; }
+
+/* ── Timing bar ── */
+.timing-bar-wrap { margin-bottom: 8px; }
+.timing-bar-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 3px;
+}
+.timing-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+.timing-bar-label {
+  font-size: 0.72rem;
+  color: var(--text);
+}
+
+/* ── Price chart ── */
+.price-chart-wrap {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--code-bg);
+}
+.chart-title {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-h);
+  margin: 0 0 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chart-legend {
+  display: flex;
+  align-items: center;
+  font-size: 0.72rem;
+  color: var(--text);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.buy-dot  { background: #22c55e; }
+.sell-dot { background: #ef4444; }
+.price-chart-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+.chart-loading, .chart-empty {
+  font-size: 0.8rem;
+  color: var(--text);
+  padding: 12px;
+  text-align: center;
+}
+
+/* ── Copy signal ── */
+.copy-signal-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 100px;
+  white-space: nowrap;
+}
+.signal-strong   { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
+.signal-moderate { background: #fef9c3; color: #854d0e; border: 1px solid #fde047; }
+.signal-mild     { background: #ffedd5; color: #c2410c; border: 1px solid #fed7aa; }
+.signal-weak     { background: var(--code-bg); color: var(--text); border: 1px solid var(--border); }
+
 /* ── Nav links ── */
 .nav-links {
   display: flex;
