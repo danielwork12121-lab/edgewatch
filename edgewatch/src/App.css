@@ -543,6 +543,55 @@
   color: var(--text-h);
 }
 
+/* ── Paper simulation ── */
+.sim-setup-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+.setup-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+.sim-trade-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+}
+.sim-value-row {
+  margin-top: 6px;
+}
+.follow-btn {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  border-radius: 100px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.follow-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.follow-toast {
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #86efac;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+}
+
 /* ── Misc ── */
 .error-msg {
   color: #ef4444;

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import type { WalletTrade, WalletPosition, PolyEvent } from '../types'
+import type { WalletTrade, WalletPosition } from '../types'
 import {
   getWalletActivity,
   getWalletPositions,
@@ -9,15 +9,16 @@ import {
 } from '../api/wallets'
 import { formatUSD, formatDate } from '../api/polymarket'
 import { scoreWallet } from '../api/scoring'
+import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import EdgeScoreCard from './EdgeScoreCard'
 
 interface Props {
   address: string
   onBack: () => void
-  onSelectEvent?: (event: PolyEvent) => void
+  onViewPortfolio?: () => void
 }
 
-function TradeRow({ trade }: { trade: WalletTrade }) {
+function TradeRow({ trade, onFollow }: { trade: WalletTrade; onFollow: (t: WalletTrade) => void }) {
   const isBuy = trade.side === 'BUY'
   const time = new Date(trade.timestamp * 1000).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
@@ -27,6 +28,9 @@ function TradeRow({ trade }: { trade: WalletTrade }) {
       <div className="trade-row-top">
         <span className={`side-badge ${isBuy ? 'buy' : 'sell'}`}>{trade.side}</span>
         <span className="trade-title">{trade.title}</span>
+        <button className="follow-btn" onClick={() => onFollow(trade)}>
+          + Paper follow
+        </button>
       </div>
       <div className="trade-row-meta">
         <span className="trade-outcome">{trade.outcome}</span>
@@ -38,12 +42,24 @@ function TradeRow({ trade }: { trade: WalletTrade }) {
   )
 }
 
-export default function WalletProfile({ address, onBack }: Props) {
+export default function WalletProfile({ address, onBack, onViewPortfolio }: Props) {
   const [trades, setTrades] = useState<WalletTrade[]>([])
   const [positions, setPositions] = useState<WalletPosition[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [minSize, setMinSize] = useState(1)
+  const [followMsg, setFollowMsg] = useState<string | null>(null)
+
+  const handleFollow = (trade: WalletTrade) => {
+    let p = loadPortfolio()
+    if (!p) p = createPortfolio(1000)
+    // Default paper size: 10 USDC or 1/10 of original trade, whichever is smaller
+    const paperSize = Math.min(10, (trade.usdcSize ?? 10) / 10)
+    const updated = addSimulatedTrade(p, trade, Math.max(1, paperSize))
+    savePortfolio(updated)
+    setFollowMsg(`Added to paper portfolio: ${trade.title} (${formatUSD(Math.max(1, paperSize))})`)
+    setTimeout(() => setFollowMsg(null), 3000)
+  }
 
   useEffect(() => {
     setLoading(true)
@@ -72,7 +88,18 @@ export default function WalletProfile({ address, onBack }: Props) {
 
   return (
     <div className="detail-page">
-      <button className="back-btn" onClick={onBack}>← Back</button>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <button className="back-btn" onClick={onBack}>← Back</button>
+        {onViewPortfolio && (
+          <button className="back-btn" onClick={onViewPortfolio} style={{ marginLeft: 'auto' }}>
+            📄 Paper Portfolio
+          </button>
+        )}
+      </div>
+
+      {followMsg && (
+        <div className="follow-toast">{followMsg}</div>
+      )}
 
       <div className="wallet-header">
         <div>
@@ -166,7 +193,7 @@ export default function WalletProfile({ address, onBack }: Props) {
               <p className="empty-msg">No trades above the size filter.</p>
             )}
             {filtered.slice(0, 100).map((t, i) => (
-              <TradeRow key={`${t.transactionHash ?? i}`} trade={t} />
+              <TradeRow key={`${t.transactionHash ?? i}`} trade={t} onFollow={handleFollow} />
             ))}
             {filtered.length > 100 && (
               <p className="empty-msg">Showing first 100 of {filtered.length} trades.</p>
