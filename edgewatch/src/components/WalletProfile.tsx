@@ -10,6 +10,7 @@ import {
 import { formatUSD, formatDate } from '../api/polymarket'
 import { scoreWallet } from '../api/scoring'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
+import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
 import EdgeScoreCard from './EdgeScoreCard'
 
 interface Props {
@@ -49,6 +50,19 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [error, setError] = useState<string | null>(null)
   const [minSize, setMinSize] = useState(1)
   const [followMsg, setFollowMsg] = useState<string | null>(null)
+  const [watching, setWatching] = useState(() => isWatchingWallet(address))
+
+  const handleToggleWatch = () => {
+    const pseudonym = trades[0]?.pseudonym ?? ''
+    const name = trades[0]?.name ?? ''
+    if (watching) {
+      unwatchWallet(address)
+      setWatching(false)
+    } else {
+      watchWallet(address, pseudonym, name)
+      setWatching(true)
+    }
+  }
 
   const handleFollow = (trade: WalletTrade) => {
     let p = loadPortfolio()
@@ -88,11 +102,17 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
 
   return (
     <div className="detail-page">
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
         <button className="back-btn" onClick={onBack}>← Back</button>
+        <button
+          className={`back-btn ${watching ? 'watching-active' : ''}`}
+          onClick={handleToggleWatch}
+        >
+          {watching ? '★ Watching' : '☆ Watch wallet'}
+        </button>
         {onViewPortfolio && (
           <button className="back-btn" onClick={onViewPortfolio} style={{ marginLeft: 'auto' }}>
-            📄 Paper Portfolio
+            Paper Portfolio
           </button>
         )}
       </div>

@@ -4,6 +4,7 @@ import MarketSearch from './components/MarketSearch'
 import MarketDetail from './components/MarketDetail'
 import WalletProfile from './components/WalletProfile'
 import PaperPortfolioPage from './components/PaperPortfolio'
+import WatchlistPage from './components/WatchlistPage'
 import './App.css'
 
 type View =
@@ -11,9 +12,22 @@ type View =
   | { page: 'detail'; event: PolyEvent }
   | { page: 'wallet'; address: string; from?: View }
   | { page: 'portfolio'; from?: View }
+  | { page: 'watchlist'; from?: View }
 
 export default function App() {
   const [view, setView] = useState<View>({ page: 'search' })
+
+  const goSearch = () => setView({ page: 'search' })
+
+  if (view.page === 'watchlist') {
+    return (
+      <WatchlistPage
+        onBack={() => setView(view.from ?? { page: 'search' })}
+        onSelectWallet={address => setView({ page: 'wallet', address, from: view })}
+        onSelectMarket={_id => goSearch()} // market lookup from watchlist: go to search for now
+      />
+    )
+  }
 
   if (view.page === 'portfolio') {
     return (
@@ -37,7 +51,7 @@ export default function App() {
     return (
       <MarketDetail
         event={view.event}
-        onBack={() => setView({ page: 'search' })}
+        onBack={goSearch}
         onSelectWallet={address =>
           setView({ page: 'wallet', address, from: view })
         }
@@ -48,6 +62,8 @@ export default function App() {
   return (
     <MarketSearch
       onSelectEvent={event => setView({ page: 'detail', event })}
+      onViewWatchlist={() => setView({ page: 'watchlist', from: view })}
+      onViewPortfolio={() => setView({ page: 'portfolio', from: view })}
     />
   )
 }

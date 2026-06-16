@@ -23,6 +23,77 @@
   font-size: 0.9rem;
 }
 
+/* ── Nav links ── */
+.nav-links {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 10px;
+}
+.nav-link {
+  font-size: 0.82rem;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  background: none;
+  color: var(--text-h);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.nav-link:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* ── Watch button active state ── */
+.watching-active {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: var(--accent-bg) !important;
+}
+
+/* ── Watchlist rows ── */
+.watch-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.watch-row-main { flex: 1; min-width: 0; }
+.watch-row-name {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: left;
+  display: block;
+  margin-bottom: 4px;
+  transition: opacity 0.15s;
+}
+.watch-row-name:hover { opacity: 0.75; }
+.watch-row-actions { flex-shrink: 0; }
+.unwatch-btn {
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.unwatch-btn:hover {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
 /* ── Search ── */
 .search-form {
   display: flex;

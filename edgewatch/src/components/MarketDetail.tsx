@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { PolyEvent, PolyMarket, WalletTrade } from '../types'
 import { parseOutcomePrices, parseOutcomes, formatUSD, formatDate } from '../api/polymarket'
 import { getMarketTrades, filterNoise, truncateAddress } from '../api/wallets'
+import { watchMarket, unwatchMarket, isWatchingMarket } from '../api/watchlist'
 
 interface Props {
   event: PolyEvent
@@ -169,12 +170,26 @@ type Tab = 'markets' | 'traders'
 
 export default function MarketDetail({ event, onBack, onSelectWallet }: Props) {
   const [tab, setTab] = useState<Tab>('markets')
+  const [watching, setWatching] = useState(() => isWatchingMarket(event.id))
   const totalVol = event.markets?.reduce((s, m) => s + (m.volume ?? 0), 0) ?? event.volume ?? 0
   const totalLiq = event.markets?.reduce((s, m) => s + (m.liquidity ?? 0), 0) ?? event.liquidity ?? 0
 
+  const handleToggleWatch = () => {
+    if (watching) { unwatchMarket(event.id); setWatching(false) }
+    else { watchMarket(event); setWatching(true) }
+  }
+
   return (
     <div className="detail-page">
-      <button className="back-btn" onClick={onBack}>← Back</button>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <button className="back-btn" onClick={onBack}>← Back</button>
+        <button
+          className={`back-btn ${watching ? 'watching-active' : ''}`}
+          onClick={handleToggleWatch}
+        >
+          {watching ? '★ Watching' : '☆ Watch market'}
+        </button>
+      </div>
 
       <div className="detail-header">
         {event.image && (

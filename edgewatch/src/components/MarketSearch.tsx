@@ -4,11 +4,13 @@ import { searchEvents, parseOutcomePrices, formatUSD, formatDate } from '../api/
 
 interface Props {
   onSelectEvent: (event: PolyEvent) => void
+  onViewWatchlist: () => void
+  onViewPortfolio: () => void
 }
 
 const SUGGESTIONS = ['AI', 'crypto', 'election', 'sports', 'anime', 'tech', 'climate']
 
-export default function MarketSearch({ onSelectEvent }: Props) {
+export default function MarketSearch({ onSelectEvent, onViewWatchlist, onViewPortfolio }: Props) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<PolyEvent[]>([])
   const [loading, setLoading] = useState(false)
@@ -46,6 +48,10 @@ export default function MarketSearch({ onSelectEvent }: Props) {
       <header className="app-header">
         <h1 className="logo">EdgeWatch</h1>
         <p className="tagline">Discover Polymarket signals</p>
+        <div className="nav-links">
+          <button className="nav-link" onClick={onViewWatchlist}>★ Watchlist</button>
+          <button className="nav-link" onClick={onViewPortfolio}>Paper Portfolio</button>
+        </div>
       </header>
 
       <form className="search-form" onSubmit={handleSubmit}>
