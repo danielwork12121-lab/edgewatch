@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import type { WalletTrade, WalletPosition } from '../types'
 import { getWalletActivity, getWalletPositions, filterNoise, truncateAddress } from '../api/wallets'
 import { formatUSD, formatDate } from '../api/polymarket'
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
+import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
 import EdgeScoreCard from './EdgeScoreCard'
 import PriceChart from './PriceChart'
 import PnLGraph from './PnLGraph'
@@ -17,6 +18,27 @@ interface Props {
 }
 
 type ProfileTab = 'overview' | 'trades' | 'charts'
+
+// Lazy chart — only mounts PriceChart (and triggers fetchPriceHistory) when user opens it
+function LazyChart({ tokenId, trades, title }: { tokenId: string; trades: WalletTrade[]; title: string }) {
+  const [opened, setOpened] = useState(false)
+  return (
+    <div className="lazy-chart-wrap">
+      <button
+        type="button"
+        className="lazy-chart-trigger"
+        onClick={() => setOpened(o => !o)}
+      >
+        <span className="lazy-chart-arrow">{opened ? '▲' : '▼'}</span>
+        <span className="lazy-chart-title">{title}</span>
+        {!opened && <span className="estimate-label"> · click to load</span>}
+      </button>
+      {opened && (
+        <PriceChart tokenId={tokenId} trades={trades} title={title} />
+      )}
+    </div>
+  )
+}
 
 function TradeRow({
   trade,
@@ -82,23 +104,55 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [watching, setWatching] = useState(() => isWatchingWallet(address))
   const [score, setScore] = useState<EdgeScore | null>(null)
   const [scoreLoading, setScoreLoading] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null)
 
-  useEffect(() => {
+  const actKey = `wallet:${address}:activity`
+  const posKey = `wallet:${address}:positions`
+
+  const loadWalletData = useCallback((forceRefresh = false) => {
+    if (!forceRefresh) {
+      const cachedAct = cacheGet<WalletTrade[]>(actKey, TTL.wallet)
+      const cachedPos = cacheGet<WalletPosition[]>(posKey, TTL.wallet)
+      if (cachedAct !== null && cachedPos !== null) {
+        setTrades(cachedAct)
+        setPositions(cachedPos)
+        setLastUpdated(Math.min(cacheTime(actKey) ?? Date.now(), cacheTime(posKey) ?? Date.now()))
+        setLoading(false)
+        return
+      }
+    }
     setLoading(true)
     setError(null)
-    setScore(null)
-    setTrades([])
-    setPositions([])
     Promise.all([
       getWalletActivity(address, 200),
       getWalletPositions(address, 100),
     ])
-      .then(([acts, pos]) => { setTrades(acts); setPositions(pos) })
+      .then(([acts, pos]) => {
+        cacheSet(actKey, acts)
+        cacheSet(posKey, pos)
+        setTrades(acts)
+        setPositions(pos)
+        setLastUpdated(Date.now())
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }, [address])
 
-  // Async entry-based scoring (fetches live prices)
+  // Initial load + reset on address change
+  useEffect(() => {
+    setScore(null)
+    setTrades([])
+    setPositions([])
+    loadWalletData()
+  }, [address])
+
+  // 30-second polling — only re-fetches when TTL expires (3min); otherwise uses cache
+  useEffect(() => {
+    const timer = setInterval(() => loadWalletData(), 30_000)
+    return () => clearInterval(timer)
+  }, [loadWalletData])
+
+  // Re-score whenever trades or size filter changes (prices may be cached for 30s)
   useEffect(() => {
     const noisy = filterNoise(trades, minSize)
     if (noisy.length === 0) { setScore(null); return }
@@ -108,6 +162,12 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
       .catch(() => setScore(null))
       .finally(() => setScoreLoading(false))
   }, [address, minSize, trades.length])
+
+  const handleRefresh = useCallback(() => {
+    cacheInvalidate(actKey, posKey)
+    setScore(null)
+    loadWalletData(true)
+  }, [actKey, posKey, loadWalletData])
 
   const handleToggleWatch = () => {
     const pseudonym = trades[0]?.pseudonym ?? ''
@@ -139,14 +199,27 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
 
   return (
     <div className="detail-page">
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-        <button className="back-btn" onClick={onBack}>← Back</button>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button type="button" className="back-btn" onClick={onBack}>← Back</button>
         <button
+          type="button"
           className={`back-btn ${watching ? 'watching-active' : ''}`}
           onClick={handleToggleWatch}
         >
           {watching ? '★ Watching' : '☆ Watch wallet'}
         </button>
+        <div className="refresh-bar" style={{ marginLeft: 'auto' }}>
+          {lastUpdated && <span className="last-updated">{formatAge(lastUpdated)}</span>}
+          <button
+            type="button"
+            className="refresh-btn"
+            onClick={handleRefresh}
+            disabled={loading}
+            title="Refresh wallet data"
+          >
+            {loading ? '↻' : '↻ Refresh'}
+          </button>
+        </div>
         {onViewPortfolio && (
           <button className="back-btn" onClick={onViewPortfolio} style={{ marginLeft: 'auto' }}>
             Portfolio
@@ -220,10 +293,10 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             <button className={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
               Performance
             </button>
-            <button className={`tab-btn ${tab === 'trades' ? 'active' : ''}`} onClick={() => setTab('trades')}>
+            <button type="button" className={`tab-btn ${tab === 'trades' ? 'active' : ''}`} onClick={() => setTab('trades')}>
               Trade History ({filtered.length})
             </button>
-            <button className={`tab-btn ${tab === 'charts' ? 'active' : ''}`} onClick={() => setTab('charts')}>
+            <button type="button" className={`tab-btn ${tab === 'charts' ? 'active' : ''}`} onClick={() => setTab('charts')}>
               Entry Charts
             </button>
           </div>
@@ -308,15 +381,13 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             </section>
           )}
 
-          {/* ── Entry Charts tab: show charts for each unique market ── */}
+          {/* ── Entry Charts tab: lazy-loaded per market ── */}
           {tab === 'charts' && (
             <section className="wallet-section">
-              <p className="score-disclaimer" style={{ marginBottom: 16 }}>
-                Price chart + entry markers for each market this wallet traded.
-                Green line = entry (BUY), red line = entry (SELL).
+              <p className="score-disclaimer" style={{ marginBottom: 12 }}>
+                Charts load individually on click. Price history is cached for 10 minutes.
               </p>
               {(() => {
-                // Unique markets with their first CLOB token
                 const seen = new Set<string>()
                 const markets: { conditionId: string; asset: string; title: string; trades: WalletTrade[] }[] = []
                 for (const t of filtered) {
@@ -332,9 +403,12 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
                 }
                 if (markets.length === 0) return <p className="empty-msg">No chart data available.</p>
                 return markets.slice(0, 10).map(m => (
-                  <div key={m.conditionId} style={{ marginBottom: 20 }}>
-                    <PriceChart tokenId={m.asset} trades={m.trades} title={m.title} />
-                  </div>
+                  <LazyChart
+                    key={m.conditionId}
+                    tokenId={m.asset}
+                    trades={m.trades}
+                    title={m.title}
+                  />
                 ))
               })()}
             </section>

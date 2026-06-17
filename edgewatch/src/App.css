@@ -6,6 +6,71 @@
   padding: 24px 16px 64px;
 }
 
+/* ── Refresh bar ── */
+.refresh-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.last-updated {
+  font-size: 0.72rem;
+  color: var(--text);
+}
+.refresh-btn {
+  font-size: 0.78rem;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--text-h);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.refresh-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+/* ── Lazy chart ── */
+.lazy-chart-wrap {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.lazy-chart-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.85rem;
+  color: var(--text-h);
+  transition: background 0.15s;
+}
+.lazy-chart-trigger:hover {
+  background: var(--code-bg);
+}
+.lazy-chart-arrow { font-size: 0.75rem; color: var(--text); }
+.lazy-chart-title { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ── Market Overview ── */
 .market-overview-stats {
   display: flex;
@@ -227,12 +292,6 @@
 .category-emoji { font-size: 0.95rem; }
 
 /* ── Section heading ── */
-.section-heading {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 14px;
-}
 .section-title {
   font-size: 1.1rem;
   font-weight: 600;

@@ -1,17 +1,24 @@
 import type { PricePoint } from '../types'
+import { cacheGet, cacheSet, TTL } from './cache'
 
 const CLOB = 'https://clob.polymarket.com'
 
 // Fetch full price history for a CLOB token (outcome-specific).
-// Returns array of {t: unixTimestamp, p: price 0-1} sorted by time.
+// Cached for 10 minutes — history data rarely changes.
 export async function fetchPriceHistory(tokenId: string): Promise<PricePoint[]> {
+  const key = `history:${tokenId}`
+  const cached = cacheGet<PricePoint[]>(key, TTL.history)
+  if (cached !== null) return cached
+
   try {
     const res = await fetch(
       `${CLOB}/prices-history?market=${encodeURIComponent(tokenId)}&interval=max&fidelity=60`
     )
     if (!res.ok) return []
     const data = await res.json()
-    return (data.history ?? []) as PricePoint[]
+    const points = (data.history ?? []) as PricePoint[]
+    if (points.length > 0) cacheSet(key, points)
+    return points
   } catch {
     return []
   }

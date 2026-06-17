@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { PolyEvent, PolyMarket, TraderRankEntry } from '../types'
 import { parseOutcomePrices, parseOutcomes, formatUSD, formatDate, timeRemaining, volatilityInfo } from '../api/polymarket'
 import { watchMarket, unwatchMarket, isWatchingMarket } from '../api/watchlist'
 import { rankTradersForMarket, enrichWithPnL, type BestTrade } from '../api/traders'
 import { truncateAddress } from '../api/wallets'
+import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
 
 interface Props {
   event: PolyEvent
@@ -198,6 +199,11 @@ function BestTradeRow({ trade, onSelectWallet }: { trade: BestTrade; onSelectWal
 
 type Tab = 'overview' | 'traders' | 'best-trades'
 
+interface IntelCache {
+  traders: TraderRankEntry[]
+  bestTrades: BestTrade[]
+}
+
 export default function MarketDetail({ event, onBack, onSelectWallet }: Props) {
   const [tab, setTab] = useState<Tab>('overview')
   const [watching, setWatching] = useState(() => isWatchingMarket(event.id))
@@ -206,34 +212,57 @@ export default function MarketDetail({ event, onBack, onSelectWallet }: Props) {
   const [intelLoading, setIntelLoading] = useState(false)
   const [intelError, setIntelError] = useState<string | null>(null)
   const [intelLoaded, setIntelLoaded] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null)
+  const enrichedRef = useRef(false)  // enrichment runs once per market, not on refresh
 
-  // Auto-load market intelligence on mount
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      setIntelLoading(true)
-      setIntelError(null)
-      try {
-        const { traders: ranked, bestTrades: best } = await rankTradersForMarket(event)
-        if (cancelled) return
+  const cacheKey = `market:${event.id}`
+
+  const loadIntelligence = useCallback((forceRefresh = false) => {
+    if (!forceRefresh) {
+      const cached = cacheGet<IntelCache>(cacheKey, TTL.intelligence)
+      if (cached !== null) {
+        setTraders(cached.traders)
+        setBestTrades(cached.bestTrades)
+        setIntelLoaded(true)
+        setLastUpdated(cacheTime(cacheKey))
+        setIntelLoading(false)
+        return
+      }
+    }
+
+    setIntelLoading(true)
+    setIntelError(null)
+    rankTradersForMarket(event)
+      .then(({ traders: ranked, bestTrades: best }) => {
+        cacheSet<IntelCache>(cacheKey, { traders: ranked, bestTrades: best })
         setTraders(ranked)
         setBestTrades(best)
         setIntelLoaded(true)
-        // Enrich top 5 with PnL in background
-        if (ranked.length > 0) {
+        setLastUpdated(Date.now())
+        // Enrich top 5 once per market session (not on every refresh)
+        if (!enrichedRef.current && ranked.length > 0) {
+          enrichedRef.current = true
           enrichWithPnL(ranked, 5).then(enriched => {
-            if (!cancelled) setTraders(enriched)
+            setTraders(enriched)
+            cacheSet<IntelCache>(cacheKey, { traders: enriched, bestTrades: best })
           })
         }
-      } catch (e) {
-        if (!cancelled) setIntelError(e instanceof Error ? e.message : 'Failed to load intelligence')
-      } finally {
-        if (!cancelled) setIntelLoading(false)
-      }
-    }
-    load()
-    return () => { cancelled = true }
+      })
+      .catch(e => setIntelError(e instanceof Error ? e.message : 'Failed to load intelligence'))
+      .finally(() => setIntelLoading(false))
   }, [event.id])
+
+  // Load on mount; reset enrichment flag on market change
+  useEffect(() => {
+    enrichedRef.current = false
+    setIntelLoaded(false)
+    loadIntelligence()
+  }, [event.id])
+
+  const handleRefresh = useCallback(() => {
+    cacheInvalidate(cacheKey)
+    loadIntelligence(true)
+  }, [cacheKey, loadIntelligence])
 
   const handleToggleWatch = () => {
     if (watching) { unwatchMarket(event.id); setWatching(false) }
@@ -246,13 +275,22 @@ export default function MarketDetail({ event, onBack, onSelectWallet }: Props) {
   return (
     <div className="detail-page">
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-        <button className="back-btn" onClick={onBack}>← Back</button>
-        <button className={`back-btn ${watching ? 'watching-active' : ''}`} onClick={handleToggleWatch}>
+        <button type="button" className="back-btn" onClick={onBack}>← Back</button>
+        <button type="button" className={`back-btn ${watching ? 'watching-active' : ''}`} onClick={handleToggleWatch}>
           {watching ? '★ Watching' : '☆ Watch'}
         </button>
-        {intelLoading && (
-          <span className="score-loading-badge">Loading market intelligence…</span>
-        )}
+        <div className="refresh-bar" style={{ marginLeft: 'auto' }}>
+          {lastUpdated && <span className="last-updated">{formatAge(lastUpdated)}</span>}
+          <button
+            type="button"
+            className="refresh-btn"
+            onClick={handleRefresh}
+            disabled={intelLoading}
+            title="Refresh market intelligence"
+          >
+            {intelLoading ? '↻' : '↻ Refresh'}
+          </button>
+        </div>
       </div>
 
       <div className="detail-header">
@@ -271,17 +309,17 @@ export default function MarketDetail({ event, onBack, onSelectWallet }: Props) {
       </div>
 
       <div className="data-source-label">
-        Polymarket public API · real data · traders auto-loaded from recent CLOB trades
+        Polymarket public API · real data · 5min cache
       </div>
 
       <div className="tab-bar">
-        <button className={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
+        <button type="button" className={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
           Market Overview
         </button>
-        <button className={`tab-btn ${tab === 'traders' ? 'active' : ''}`} onClick={() => setTab('traders')}>
+        <button type="button" className={`tab-btn ${tab === 'traders' ? 'active' : ''}`} onClick={() => setTab('traders')}>
           Smart Traders {intelLoaded ? `(${traders.length})` : intelLoading ? '…' : ''}
         </button>
-        <button className={`tab-btn ${tab === 'best-trades' ? 'active' : ''}`} onClick={() => setTab('best-trades')}>
+        <button type="button" className={`tab-btn ${tab === 'best-trades' ? 'active' : ''}`} onClick={() => setTab('best-trades')}>
           Best Trades {intelLoaded ? `(${bestTrades.length})` : intelLoading ? '…' : ''}
         </button>
       </div>

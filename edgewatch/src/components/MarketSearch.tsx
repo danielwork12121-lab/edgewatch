@@ -10,6 +10,7 @@ import {
   volatilityInfo,
 } from '../api/polymarket'
 import { CATEGORIES, type Category } from '../api/categories'
+import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
 import TraderRanking from './TraderRanking'
 
 interface Props {
@@ -42,7 +43,7 @@ function MarketCard({ event, onClick }: { event: PolyEvent; onClick: () => void 
           )}
           <span className="stat vol">Vol {formatUSD(event.volume24hr ?? event.volume ?? 0)}</span>
           <span className="stat liq">Liq {formatUSD(totalLiq || (event.liquidity ?? 0))}</span>
-          <span className={`stat vol-indicator vol-${vol.level}`}>{vol.label} vol</span>
+          <span className={`stat vol-indicator vol-${vol.level}`}>{vol.level !== 'low' ? vol.label : ''} vol</span>
           <span className="stat date">{remain}</span>
         </div>
       </div>
@@ -63,50 +64,78 @@ export default function MarketSearch({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isSearchMode, setIsSearchMode] = useState(false)
-  const [activeQuery, setActiveQuery] = useState('') // query that produced current results
+  const [activeQuery, setActiveQuery] = useState('')
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null)
 
   // ── Category loader ───────────────────────────────────────────────────────
-  const loadCategory = useCallback((cat: Category) => {
+  const loadCategory = useCallback((cat: Category, forceRefresh = false) => {
+    const key = cat.tag ? `category:${cat.tag}` : 'trending'
+
+    if (!forceRefresh) {
+      const cached = cacheGet<PolyEvent[]>(key, TTL.markets)
+      if (cached !== null) {
+        setResults(cached)
+        setLastUpdated(cacheTime(key))
+        setLoading(false)
+        return
+      }
+    }
+
     setLoading(true)
     setError(null)
-    setResults([])        // clear stale results immediately
-    setIsSearchMode(false)
-    setActiveQuery('')
+    setResults([])
     const fetch = cat.tag ? searchByTag(cat.tag, 24) : fetchTrending(16)
     fetch
-      .then(data => setResults(data))
+      .then(data => {
+        cacheSet(key, data)
+        setResults(data)
+        setLastUpdated(Date.now())
+      })
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load markets'))
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => {
-    loadCategory(CATEGORIES[0])
-  }, [loadCategory])
+  useEffect(() => { loadCategory(CATEGORIES[0]) }, [loadCategory])
 
   // ── Category pill click ───────────────────────────────────────────────────
   const handleCategoryClick = useCallback((cat: Category) => {
     setActiveCategory(cat)
     setTab('markets')
-    setQuery('')            // clear the text input
+    setQuery('')
+    setIsSearchMode(false)
+    setActiveQuery('')
     loadCategory(cat)
   }, [loadCategory])
 
   // ── Search submission ─────────────────────────────────────────────────────
-  // Synchronous handler (not async) — e.preventDefault() is called first,
-  // then the API call is driven via .then()/.catch() to avoid any async/event
-  // interaction issues.
+  // Synchronous handler — e.preventDefault() fires before any async work.
   const handleSearch = useCallback((e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault()      // must be first — stops browser page refresh
+    e.preventDefault()
     const q = query.trim()
     if (!q) return
-    setTab('markets')       // always reset to markets tab
+
+    setTab('markets')
     setIsSearchMode(true)
-    setActiveQuery(q)       // store what was actually searched
+    setActiveQuery(q)
+
+    const key = `search:${q}`
+    const cached = cacheGet<PolyEvent[]>(key, TTL.markets)
+    if (cached !== null) {
+      setResults(cached)
+      setLastUpdated(cacheTime(key))
+      setLoading(false)
+      return
+    }
+
     setLoading(true)
     setError(null)
-    setResults([])          // clear stale results so old data doesn't show through
+    setResults([])
     searchEvents(q)
-      .then(data => setResults(data))
+      .then(data => {
+        cacheSet(key, data)
+        setResults(data)
+        setLastUpdated(Date.now())
+      })
       .catch(err => setError(err instanceof Error ? err.message : 'Search failed'))
       .finally(() => setLoading(false))
   }, [query])
@@ -119,10 +148,29 @@ export default function MarketSearch({
     loadCategory(activeCategory)
   }, [activeCategory, loadCategory])
 
-  // ── Heading text — always computed, never hidden ──────────────────────────
+  // ── Refresh current view ──────────────────────────────────────────────────
+  const handleRefresh = useCallback(() => {
+    if (isSearchMode && activeQuery) {
+      const key = `search:${activeQuery}`
+      cacheInvalidate(key)
+      setLoading(true)
+      setError(null)
+      setResults([])
+      searchEvents(activeQuery)
+        .then(data => { cacheSet(key, data); setResults(data); setLastUpdated(Date.now()) })
+        .catch(err => setError(err instanceof Error ? err.message : 'Search failed'))
+        .finally(() => setLoading(false))
+    } else {
+      const key = activeCategory.tag ? `category:${activeCategory.tag}` : 'trending'
+      cacheInvalidate(key)
+      loadCategory(activeCategory, true)
+    }
+  }, [isSearchMode, activeQuery, activeCategory, loadCategory])
+
+  // ── Heading ───────────────────────────────────────────────────────────────
   let headingText: string
   if (loading) {
-    headingText = isSearchMode ? `Searching for "${activeQuery}"…` : 'Loading markets…'
+    headingText = isSearchMode ? `Searching "${activeQuery}"…` : 'Loading markets…'
   } else if (isSearchMode) {
     headingText = `Results for "${activeQuery}" — ${results.length} market${results.length !== 1 ? 's' : ''}`
   } else if (activeCategory.id === 'trending') {
@@ -144,7 +192,7 @@ export default function MarketSearch({
         <p className="tagline">Identify and copy high-signal Polymarket traders</p>
       </header>
 
-      {/* Category selector — all buttons explicitly type="button" */}
+      {/* Category selector */}
       <div className="category-bar">
         {CATEGORIES.map(cat => (
           <button
@@ -158,14 +206,7 @@ export default function MarketSearch({
         ))}
       </div>
 
-      {/*
-        Search form:
-        - value bound to `query` state (controlled input)
-        - onChange keeps state in sync on every keystroke
-        - onSubmit fires on Enter key OR button click
-        - e.preventDefault() stops browser page refresh
-        - submit button is type="submit"; clear button is type="button"
-      */}
+      {/* Search form */}
       <form className="search-form" onSubmit={handleSearch} noValidate>
         <input
           className="search-input"
@@ -180,23 +221,32 @@ export default function MarketSearch({
           {loading && isSearchMode ? '…' : 'Search'}
         </button>
         {isSearchMode && (
-          <button type="button" className="back-btn" onClick={clearSearch}>
-            ✕ Clear
-          </button>
+          <button type="button" className="back-btn" onClick={clearSearch}>✕ Clear</button>
         )}
       </form>
 
       {error && <p className="error-msg">{error}</p>}
 
-      {/* Heading — always visible so the user always knows what they're seeing */}
+      {/* Heading + refresh bar — always visible */}
       <div className="section-heading">
         <h2 className="section-title">{headingText}</h2>
-        {!loading && !isSearchMode && results.length > 0 && (
-          <span className="data-badge">Live · Polymarket</span>
-        )}
+        <div className="refresh-bar">
+          {lastUpdated && (
+            <span className="last-updated">{formatAge(lastUpdated)}</span>
+          )}
+          <button
+            type="button"
+            className="refresh-btn"
+            onClick={handleRefresh}
+            disabled={loading}
+            title="Refresh data"
+          >
+            ↻
+          </button>
+        </div>
       </div>
 
-      {/* Tabs — only when results are loaded */}
+      {/* Tabs */}
       {results.length > 0 && !loading && (
         <div className="tab-bar">
           <button
