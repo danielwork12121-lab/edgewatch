@@ -30,7 +30,7 @@ function MarketCard({ event, onClick }: { event: PolyEvent; onClick: () => void 
   const totalLiq = (event.markets ?? []).reduce((s, mk) => s + (mk.liquidity ?? 0), 0)
 
   return (
-    <button className="market-card" onClick={onClick}>
+    <button type="button" className="market-card" onClick={onClick}>
       {event.image && (
         <img className="market-img" src={event.image} alt="" loading="lazy" />
       )}
@@ -50,7 +50,12 @@ function MarketCard({ event, onClick }: { event: PolyEvent; onClick: () => void 
   )
 }
 
-export default function MarketSearch({ onSelectEvent, onSelectWallet, onViewWatchlist, onViewPortfolio }: Props) {
+export default function MarketSearch({
+  onSelectEvent,
+  onSelectWallet,
+  onViewWatchlist,
+  onViewPortfolio,
+}: Props) {
   const [activeCategory, setActiveCategory] = useState<Category>(CATEGORIES[0])
   const [tab, setTab] = useState<DiscoveryTab>('markets')
   const [query, setQuery] = useState('')
@@ -58,63 +63,72 @@ export default function MarketSearch({ onSelectEvent, onSelectWallet, onViewWatc
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isSearchMode, setIsSearchMode] = useState(false)
-  const [activeQuery, setActiveQuery] = useState('')  // query that produced current results
+  const [activeQuery, setActiveQuery] = useState('') // query that produced current results
 
-  const loadCategory = useCallback(async (cat: Category) => {
+  // ── Category loader ───────────────────────────────────────────────────────
+  const loadCategory = useCallback((cat: Category) => {
     setLoading(true)
     setError(null)
+    setResults([])        // clear stale results immediately
     setIsSearchMode(false)
     setActiveQuery('')
-    try {
-      const data = cat.tag ? await searchByTag(cat.tag, 24) : await fetchTrending(16)
-      setResults(data)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load markets')
-      setResults([])
-    } finally {
-      setLoading(false)
-    }
+    const fetch = cat.tag ? searchByTag(cat.tag, 24) : fetchTrending(16)
+    fetch
+      .then(data => setResults(data))
+      .catch(e => setError(e instanceof Error ? e.message : 'Failed to load markets'))
+      .finally(() => setLoading(false))
   }, [])
 
   useEffect(() => {
     loadCategory(CATEGORIES[0])
   }, [loadCategory])
 
-  const handleCategoryClick = (cat: Category) => {
+  // ── Category pill click ───────────────────────────────────────────────────
+  const handleCategoryClick = useCallback((cat: Category) => {
     setActiveCategory(cat)
     setTab('markets')
-    setQuery('')
-    setIsSearchMode(false)
-    setActiveQuery('')
+    setQuery('')            // clear the text input
     loadCategory(cat)
-  }
+  }, [loadCategory])
 
-  // ── SEARCH: always overrides category. Query is passed directly to API. ──
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault()
+  // ── Search submission ─────────────────────────────────────────────────────
+  // Synchronous handler (not async) — e.preventDefault() is called first,
+  // then the API call is driven via .then()/.catch() to avoid any async/event
+  // interaction issues.
+  const handleSearch = useCallback((e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()      // must be first — stops browser page refresh
     const q = query.trim()
     if (!q) return
-    setTab('markets')           // reset tab so grid is visible
+    setTab('markets')       // always reset to markets tab
     setIsSearchMode(true)
-    setActiveQuery(q)
+    setActiveQuery(q)       // store what was actually searched
     setLoading(true)
     setError(null)
-    try {
-      const data = await searchEvents(q)  // q passed directly — no category filter applied
-      setResults(data)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed')
-      setResults([])
-    } finally {
-      setLoading(false)
-    }
-  }
+    setResults([])          // clear stale results so old data doesn't show through
+    searchEvents(q)
+      .then(data => setResults(data))
+      .catch(err => setError(err instanceof Error ? err.message : 'Search failed'))
+      .finally(() => setLoading(false))
+  }, [query])
 
-  const clearSearch = () => {
+  // ── Clear search ──────────────────────────────────────────────────────────
+  const clearSearch = useCallback(() => {
     setQuery('')
     setIsSearchMode(false)
     setActiveQuery('')
     loadCategory(activeCategory)
+  }, [activeCategory, loadCategory])
+
+  // ── Heading text — always computed, never hidden ──────────────────────────
+  let headingText: string
+  if (loading) {
+    headingText = isSearchMode ? `Searching for "${activeQuery}"…` : 'Loading markets…'
+  } else if (isSearchMode) {
+    headingText = `Results for "${activeQuery}" — ${results.length} market${results.length !== 1 ? 's' : ''}`
+  } else if (activeCategory.id === 'trending') {
+    headingText = '🔥 Trending Markets'
+  } else {
+    headingText = `${activeCategory.emoji} ${activeCategory.label} Markets`
   }
 
   return (
@@ -123,18 +137,19 @@ export default function MarketSearch({ onSelectEvent, onSelectWallet, onViewWatc
         <div className="app-header-top">
           <h1 className="logo">EdgeWatch</h1>
           <div className="nav-links">
-            <button className="nav-link" onClick={onViewWatchlist}>★ Watchlist</button>
-            <button className="nav-link" onClick={onViewPortfolio}>Paper Portfolio</button>
+            <button type="button" className="nav-link" onClick={onViewWatchlist}>★ Watchlist</button>
+            <button type="button" className="nav-link" onClick={onViewPortfolio}>Paper Portfolio</button>
           </div>
         </div>
         <p className="tagline">Identify and copy high-signal Polymarket traders</p>
       </header>
 
-      {/* Category selector — disabled in search mode */}
+      {/* Category selector — all buttons explicitly type="button" */}
       <div className="category-bar">
         {CATEGORIES.map(cat => (
           <button
             key={cat.id}
+            type="button"
             className={`category-pill ${!isSearchMode && activeCategory.id === cat.id ? 'active' : ''}`}
             onClick={() => handleCategoryClick(cat)}
           >
@@ -143,12 +158,21 @@ export default function MarketSearch({ onSelectEvent, onSelectWallet, onViewWatc
         ))}
       </div>
 
-      {/* Search — highest priority, always overrides category */}
-      <form className="search-form" onSubmit={handleSearch}>
+      {/*
+        Search form:
+        - value bound to `query` state (controlled input)
+        - onChange keeps state in sync on every keystroke
+        - onSubmit fires on Enter key OR button click
+        - e.preventDefault() stops browser page refresh
+        - submit button is type="submit"; clear button is type="button"
+      */}
+      <form className="search-form" onSubmit={handleSearch} noValidate>
         <input
           className="search-input"
           type="text"
-          placeholder="Search any topic: anime, AI, elections, BTC…"
+          autoFocus
+          autoComplete="off"
+          placeholder="Search: anime, AI, elections, BTC…"
           value={query}
           onChange={e => setQuery(e.target.value)}
         />
@@ -156,47 +180,40 @@ export default function MarketSearch({ onSelectEvent, onSelectWallet, onViewWatc
           {loading && isSearchMode ? '…' : 'Search'}
         </button>
         {isSearchMode && (
-          <button type="button" className="back-btn" onClick={clearSearch}>✕ Clear</button>
+          <button type="button" className="back-btn" onClick={clearSearch}>
+            ✕ Clear
+          </button>
         )}
       </form>
 
       {error && <p className="error-msg">{error}</p>}
 
-      {/* Heading — shows what is currently displayed */}
-      {!loading && (
-        <div className="section-heading">
-          {isSearchMode ? (
-            <>
-              <h2 className="section-title">Results for "{activeQuery}"</h2>
-              <span className="data-badge">{results.length} markets</span>
-            </>
-          ) : (
-            <>
-              <h2 className="section-title">
-                {activeCategory.id === 'trending'
-                  ? '🔥 Trending Markets'
-                  : `${activeCategory.emoji} ${activeCategory.label} Markets`}
-              </h2>
-              <span className="data-badge">{results.length} markets · Live</span>
-            </>
-          )}
-        </div>
-      )}
+      {/* Heading — always visible so the user always knows what they're seeing */}
+      <div className="section-heading">
+        <h2 className="section-title">{headingText}</h2>
+        {!loading && !isSearchMode && results.length > 0 && (
+          <span className="data-badge">Live · Polymarket</span>
+        )}
+      </div>
 
-      {/* Tabs — shown in both category and search mode */}
-      {results.length > 0 && (
+      {/* Tabs — only when results are loaded */}
+      {results.length > 0 && !loading && (
         <div className="tab-bar">
           <button
+            type="button"
             className={`tab-btn ${tab === 'markets' ? 'active' : ''}`}
             onClick={() => setTab('markets')}
           >
             Markets ({results.length})
           </button>
           <button
+            type="button"
             className={`tab-btn ${tab === 'traders' ? 'active' : ''}`}
             onClick={() => setTab('traders')}
           >
-            {isSearchMode ? `Top Traders for "${activeQuery}"` : `Top ${activeCategory.label} Traders`}
+            {isSearchMode
+              ? `Top Traders for "${activeQuery}"`
+              : `Top ${activeCategory.label} Traders`}
           </button>
         </div>
       )}
@@ -207,13 +224,19 @@ export default function MarketSearch({ onSelectEvent, onSelectWallet, onViewWatc
           {loading && <p className="empty-msg">Loading…</p>}
           {!loading && results.length === 0 && !error && (
             <p className="empty-msg">
-              {isSearchMode ? `No active markets found for "${activeQuery}".` : 'No markets found.'}
+              {isSearchMode
+                ? `No active markets found for "${activeQuery}".`
+                : 'No markets found.'}
             </p>
           )}
           {results.length > 0 && (
             <div className="results-grid">
               {results.map(event => (
-                <MarketCard key={event.id} event={event} onClick={() => onSelectEvent(event)} />
+                <MarketCard
+                  key={event.id}
+                  event={event}
+                  onClick={() => onSelectEvent(event)}
+                />
               ))}
             </div>
           )}
