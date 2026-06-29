@@ -44,10 +44,18 @@ export default function PriceChart({ tokenId, trades, title }: Props) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    setLoading(true)
+    let cancelled = false
     fetchPriceHistory(tokenId)
-      .then(setHistory)
-      .finally(() => setLoading(false))
+      .then(points => {
+        if (!cancelled) setHistory(points)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [tokenId])
 
   if (loading) return <div className="chart-loading">Loading price chart…</div>

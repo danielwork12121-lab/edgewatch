@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import {
   loadPortfolio,
   createPortfolio,
@@ -57,30 +57,22 @@ function TradeCard({ trade }: { trade: SimulatedTrade }) {
 }
 
 export default function PaperPortfolioPage({ onBack }: Props) {
-  const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
+  const [portfolio, setPortfolio] = useState<Portfolio | null>(loadPortfolio)
   const [balance, setBalance] = useState('1000')
-  const [showSetup, setShowSetup] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
-
-  useEffect(() => {
-    const p = loadPortfolio()
-    if (p) setPortfolio(p)
-    else setShowSetup(true)
-  }, [])
+  const showSetup = portfolio === null
 
   const handleCreate = () => {
     const b = parseFloat(balance)
     if (!b || b <= 0) return
     const p = createPortfolio(b)
     setPortfolio(p)
-    setShowSetup(false)
   }
 
   const handleClear = () => {
     if (!confirm('Reset paper portfolio? All simulated trades will be lost.')) return
     clearPortfolio()
     setPortfolio(null)
-    setShowSetup(true)
   }
 
   const handleRefresh = async () => {

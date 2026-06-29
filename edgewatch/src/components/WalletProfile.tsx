@@ -136,15 +136,14 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
-  }, [address])
+  }, [address, actKey, posKey])
 
-  // Initial load + reset on address change
   useEffect(() => {
-    setScore(null)
-    setTrades([])
-    setPositions([])
-    loadWalletData()
-  }, [address])
+    const timer = window.setTimeout(() => {
+      void loadWalletData()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [loadWalletData])
 
   // 30-second polling — only re-fetches when TTL expires (3min); otherwise uses cache
   useEffect(() => {
@@ -155,13 +154,20 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   // Re-score whenever trades or size filter changes (prices may be cached for 30s)
   useEffect(() => {
     const noisy = filterNoise(trades, minSize)
-    if (noisy.length === 0) { setScore(null); return }
-    setScoreLoading(true)
-    computeEntryScore(noisy)
-      .then(setScore)
-      .catch(() => setScore(null))
-      .finally(() => setScoreLoading(false))
-  }, [address, minSize, trades.length])
+    const timer = window.setTimeout(() => {
+      if (noisy.length === 0) {
+        setScore(null)
+        setScoreLoading(false)
+        return
+      }
+      setScoreLoading(true)
+      computeEntryScore(noisy)
+        .then(setScore)
+        .catch(() => setScore(null))
+        .finally(() => setScoreLoading(false))
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [minSize, trades])
 
   const handleRefresh = useCallback(() => {
     cacheInvalidate(actKey, posKey)

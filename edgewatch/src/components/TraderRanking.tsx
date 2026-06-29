@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import type { PolyEvent, TraderRankEntry } from '../types'
 import { rankTradersForEvents, enrichWithPnL } from '../api/traders'
 import { formatUSD } from '../api/polymarket'
@@ -104,7 +104,7 @@ export default function TraderRanking({ events, categoryLabel, onSelectWallet, a
   const [error, setError] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -122,19 +122,16 @@ export default function TraderRanking({ events, categoryLabel, onSelectWallet, a
     } finally {
       setLoading(false)
     }
-  }
-
-  // Reset when events change
-  useEffect(() => {
-    setLoaded(false)
-    setTraders([])
-    setError(null)
-  }, [events.map(e => e.id).join(',')])
+  }, [events])
 
   // Auto-load if prop set
   useEffect(() => {
-    if (autoLoad && !loaded && !loading) load()
-  }, [autoLoad, events.map(e => e.id).join(',')])
+    if (!autoLoad || loaded || loading) return
+    const timer = window.setTimeout(() => {
+      void load()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [autoLoad, loaded, loading, load])
 
   if (!loaded && !loading && !autoLoad) {
     return (

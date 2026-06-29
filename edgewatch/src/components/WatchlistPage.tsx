@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import {
   loadWatchlist,
   unwatchWallet,
@@ -77,10 +77,6 @@ type WatchTab = 'wallets' | 'markets'
 export default function WatchlistPage({ onBack, onSelectWallet, onSelectMarket }: Props) {
   const [tab, setTab] = useState<WatchTab>('wallets')
   const [wl, setWl] = useState(loadWatchlist)
-
-  useEffect(() => {
-    setWl(loadWatchlist())
-  }, [])
 
   const removeWallet = (addr: string) => setWl(unwatchWallet(addr))
   const removeMarket = (id: string) => setWl(unwatchMarket(id))

@@ -12,7 +12,7 @@ interface StreakResult {
   currentType: 'win' | 'loss' | null
 }
 
-export function computeStreak(positions: WalletPosition[]): StreakResult {
+function computeStreak(positions: WalletPosition[]): StreakResult {
   const sorted = [...positions]
     .filter(p => (p.initialValue ?? 0) > 0)
     .sort((a, b) => new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime())
@@ -49,21 +49,37 @@ export default function PnLGraph({ positions }: Props) {
     return <p className="empty-msg">No position history available.</p>
   }
 
-  // Compute per-position data with running cumulative PnL and drawdown
-  let running = 0
-  let peak = 0
-  const data = sorted.map(pos => {
-    running += pos.cashPnl ?? 0
-    peak = Math.max(peak, running)
+  // Compute per-position data with running cumulative PnL and drawdown.
+  const series = sorted.reduce<{
+    data: Array<{
+      pnl: number
+      cumPnl: number
+      drawdown: number
+      title: string
+    }>
+    running: number
+    peak: number
+  }>((acc, pos) => {
+    const pnl = pos.cashPnl ?? 0
+    const running = acc.running + pnl
+    const peak = Math.max(acc.peak, running)
     return {
-      pnl: pos.cashPnl ?? 0,
-      cumPnl: running,
-      drawdown: running - peak,
-      title: pos.title,
+      data: [
+        ...acc.data,
+        {
+          pnl,
+          cumPnl: running,
+          drawdown: running - peak,
+          title: pos.title,
+        },
+      ],
+      running,
+      peak,
     }
-  })
+  }, { data: [], running: 0, peak: 0 })
 
-  const totalPnl = running
+  const data = series.data
+  const totalPnl = series.running
   const wins = sorted.filter(p => (p.cashPnl ?? 0) >= 0).length
   const losses = sorted.length - wins
   const streak = computeStreak(positions)

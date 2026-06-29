@@ -22,9 +22,10 @@ export default function App() {
   if (view.page === 'watchlist') {
     return (
       <WatchlistPage
+        key="watchlist"
         onBack={() => setView(view.from ?? { page: 'search' })}
         onSelectWallet={address => setView({ page: 'wallet', address, from: view })}
-        onSelectMarket={_id => goSearch()}
+        onSelectMarket={() => goSearch()}
       />
     )
   }
@@ -32,6 +33,7 @@ export default function App() {
   if (view.page === 'portfolio') {
     return (
       <PaperPortfolioPage
+        key="portfolio"
         onBack={() => setView(view.from ?? { page: 'search' })}
       />
     )
@@ -40,6 +42,7 @@ export default function App() {
   if (view.page === 'wallet') {
     return (
       <WalletProfile
+        key={view.address}
         address={view.address}
         onBack={() => setView(view.from ?? { page: 'search' })}
         onViewPortfolio={() => setView({ page: 'portfolio', from: view })}
@@ -50,6 +53,7 @@ export default function App() {
   if (view.page === 'detail') {
     return (
       <MarketDetail
+        key={view.event.id}
         event={view.event}
         onBack={goSearch}
         onSelectWallet={address =>
@@ -61,6 +65,7 @@ export default function App() {
 
   return (
     <MarketSearch
+      key="search"
       onSelectEvent={event => setView({ page: 'detail', event })}
       onSelectWallet={address => setView({ page: 'wallet', address, from: view })}
       onViewWatchlist={() => setView({ page: 'watchlist', from: view })}

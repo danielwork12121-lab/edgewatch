@@ -95,7 +95,12 @@ export default function MarketSearch({
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { loadCategory(CATEGORIES[0]) }, [loadCategory])
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      loadCategory(CATEGORIES[0])
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [loadCategory])
 
   // ── Category pill click ───────────────────────────────────────────────────
   const handleCategoryClick = useCallback((cat: Category) => {
@@ -296,6 +301,7 @@ export default function MarketSearch({
       {/* Trader ranking */}
       {tab === 'traders' && results.length > 0 && (
         <TraderRanking
+          key={results.map(event => event.id).join(',')}
           events={results}
           categoryLabel={isSearchMode ? `"${activeQuery}"` : activeCategory.label}
           onSelectWallet={onSelectWallet}

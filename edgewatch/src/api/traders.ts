@@ -74,7 +74,7 @@ async function fetchAndRank(tokenIds: string[], minTrades = 1): Promise<{
   }
 
   const traders = [...walletMap.entries()]
-    .filter(([_, w]) => w.trades.length >= minTrades)
+    .filter(([, w]) => w.trades.length >= minTrades)
     .sort((a, b) => b[1].volume - a[1].volume)
     .slice(0, 25)
     .map(([addr, w]): TraderRankEntry => {

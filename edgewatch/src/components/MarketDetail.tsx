@@ -250,14 +250,15 @@ export default function MarketDetail({ event, onBack, onSelectWallet }: Props) {
       })
       .catch(e => setIntelError(e instanceof Error ? e.message : 'Failed to load intelligence'))
       .finally(() => setIntelLoading(false))
-  }, [event.id])
+  }, [cacheKey, event])
 
-  // Load on mount; reset enrichment flag on market change
   useEffect(() => {
-    enrichedRef.current = false
-    setIntelLoaded(false)
-    loadIntelligence()
-  }, [event.id])
+    const timer = window.setTimeout(() => {
+      enrichedRef.current = false
+      void loadIntelligence()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [loadIntelligence])
 
   const handleRefresh = useCallback(() => {
     cacheInvalidate(cacheKey)
