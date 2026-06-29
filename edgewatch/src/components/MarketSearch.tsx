@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { PolyEvent } from '../types'
 import {
+  toFiniteNumber,
   searchEvents,
   fetchTrending,
   searchByTag,
   parseOutcomePrices,
   formatUSD,
+  formatPercent,
   timeRemaining,
   volatilityInfo,
 } from '../api/polymarket'
@@ -28,7 +30,15 @@ function MarketCard({ event, onClick }: { event: PolyEvent; onClick: () => void 
   const yesPrice = prices[0] ?? null
   const vol = volatilityInfo(m?.oneDayPriceChange)
   const remain = timeRemaining(event.endDate)
-  const totalLiq = (event.markets ?? []).reduce((s, mk) => s + (mk.liquidity ?? 0), 0)
+  const volumeValue = toFiniteNumber(event.volume24hr ?? event.volume, Number.NaN)
+  const marketLiquidityValues = (event.markets ?? [])
+    .map(mk => toFiniteNumber(mk.liquidity, Number.NaN))
+    .filter(Number.isFinite)
+  const liquidityValue = marketLiquidityValues.length > 0
+    ? marketLiquidityValues.reduce((sum, value) => sum + value, 0)
+    : toFiniteNumber(event.liquidity, Number.NaN)
+  const volumeLabel = Number.isFinite(volumeValue) ? formatUSD(volumeValue) : '—'
+  const liquidityLabel = Number.isFinite(liquidityValue) ? formatUSD(liquidityValue) : '—'
 
   return (
     <button type="button" className="market-card" onClick={onClick}>
@@ -39,10 +49,13 @@ function MarketCard({ event, onClick }: { event: PolyEvent; onClick: () => void 
         <p className="market-title">{event.title}</p>
         <div className="market-stats">
           {yesPrice !== null && (
-            <span className="stat prob">{(yesPrice * 100).toFixed(0)}%</span>
+            <span className="stat prob">{formatPercent(yesPrice)}</span>
           )}
-          <span className="stat vol">Vol {formatUSD(event.volume24hr ?? event.volume ?? 0)}</span>
-          <span className="stat liq">Liq {formatUSD(totalLiq || (event.liquidity ?? 0))}</span>
+          {yesPrice === null && (
+            <span className="stat prob">—</span>
+          )}
+          <span className="stat vol">Vol {volumeLabel}</span>
+          <span className="stat liq">Liq {liquidityLabel}</span>
           <span className={`stat vol-indicator vol-${vol.level}`}>{vol.level !== 'low' ? vol.label : ''} vol</span>
           <span className="stat date">{remain}</span>
         </div>

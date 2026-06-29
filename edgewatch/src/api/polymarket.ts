@@ -2,6 +2,16 @@ import type { PolyEvent, PolyMarket } from '../types'
 
 const GAMMA = 'https://gamma-api.polymarket.com'
 
+export function toFiniteNumber(value: unknown, fallback = 0): number {
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Number(value.trim())
+        : Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
 export async function searchEvents(query: string): Promise<PolyEvent[]> {
   const params = new URLSearchParams({
     q: query,
@@ -54,8 +64,8 @@ export function timeRemaining(endDateIso: string | null): string {
   return `${hours}h`
 }
 
-export function volatilityInfo(oneDayChange: number | undefined): { label: string; level: 'low' | 'med' | 'high' } {
-  const abs = Math.abs(oneDayChange ?? 0)
+export function volatilityInfo(oneDayChange: unknown): { label: string; level: 'low' | 'med' | 'high' } {
+  const abs = Math.abs(toFiniteNumber(oneDayChange))
   if (abs >= 0.08) return { label: 'High', level: 'high' }
   if (abs >= 0.03) return { label: 'Med', level: 'med' }
   return { label: 'Low', level: 'low' }
@@ -73,26 +83,37 @@ export async function getMarket(id: string): Promise<PolyMarket> {
   return res.json()
 }
 
-export function parseOutcomePrices(raw: string): number[] {
+export function parseOutcomePrices(raw: unknown): number[] {
   try {
-    return JSON.parse(raw).map(Number)
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (!Array.isArray(parsed)) return []
+    return parsed.map(value => toFiniteNumber(value, Number.NaN))
   } catch {
     return []
   }
 }
 
-export function parseOutcomes(raw: string): string[] {
+export function parseOutcomes(raw: unknown): string[] {
   try {
-    return JSON.parse(raw)
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+    return Array.isArray(parsed) ? parsed.map(String) : []
   } catch {
     return []
   }
 }
 
-export function formatUSD(n: number): string {
+export function formatUSD(value: unknown): string {
+  const n = toFiniteNumber(value, Number.NaN)
+  if (!Number.isFinite(n)) return '$0'
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`
   return `$${n.toFixed(0)}`
+}
+
+export function formatPercent(value: unknown, digits = 0): string {
+  const n = toFiniteNumber(value, Number.NaN)
+  if (!Number.isFinite(n)) return '—'
+  return `${(n * 100).toFixed(digits)}%`
 }
 
 export function formatDate(iso: string | null): string {

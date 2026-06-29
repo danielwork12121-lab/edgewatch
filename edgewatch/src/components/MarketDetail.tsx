@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { PolyEvent, PolyMarket, TraderRankEntry } from '../types'
-import { parseOutcomePrices, parseOutcomes, formatUSD, formatDate, timeRemaining, volatilityInfo } from '../api/polymarket'
+import { parseOutcomePrices, parseOutcomes, formatUSD, formatPercent, formatDate, timeRemaining, volatilityInfo } from '../api/polymarket'
 import { watchMarket, unwatchMarket, isWatchingMarket } from '../api/watchlist'
 import { rankTradersForMarket, enrichWithPnL, type BestTrade } from '../api/traders'
 import { truncateAddress } from '../api/wallets'
@@ -15,15 +15,15 @@ interface Props {
 // ── Market Overview ──────────────────────────────────────────────────────────
 
 function OutcomeBar({ label, price }: { label: string; price: number }) {
-  const pct = (price * 100).toFixed(1)
+  const pct = formatPercent(price, 1)
   return (
     <div className="outcome-row">
       <div className="outcome-header">
         <span className="outcome-label">{label}</span>
-        <span className="outcome-pct">{pct}%</span>
+        <span className="outcome-pct">{pct}</span>
       </div>
       <div className="outcome-bar-track">
-        <div className="outcome-bar-fill" style={{ width: `${pct}%` }} />
+        <div className="outcome-bar-fill" style={{ width: pct === '—' ? '0%' : pct }} />
       </div>
     </div>
   )
@@ -57,7 +57,7 @@ function MarketOverview({ event }: { event: PolyEvent }) {
         </div>
         {firstMkt?.lastTradePrice !== undefined && (
           <div className="overview-stat">
-            <span className="overview-stat-val">{((firstMkt.lastTradePrice ?? 0) * 100).toFixed(1)}¢</span>
+            <span className="overview-stat-val">{formatPercent(firstMkt.lastTradePrice, 1)}</span>
             <span className="overview-stat-label">Last Price</span>
           </div>
         )}
