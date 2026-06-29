@@ -8,6 +8,7 @@ const store = new Map<string, Entry<unknown>>()
 export const TTL = {
   markets:      2 * 60_000,   // 2 min  — category/search results
   intelligence: 5 * 60_000,   // 5 min  — market trader intelligence
+  hotTraders:   2 * 60_000,   // 2 min  — hot trader feed
   wallet:       3 * 60_000,   // 3 min  — wallet activity + positions
   price:        30_000,        // 30 sec — individual CLOB prices
   history:      10 * 60_000,  // 10 min — CLOB price history

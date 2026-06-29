@@ -8,7 +8,7 @@ import {
   type PaperPortfolio as Portfolio,
   type SimulatedTrade,
 } from '../api/simulation'
-import { formatUSD, formatDate } from '../api/polymarket'
+import { formatUSD, formatDate, formatPercent } from '../api/polymarket'
 
 interface Props {
   onBack: () => void
@@ -31,15 +31,15 @@ function TradeCard({ trade }: { trade: SimulatedTrade }) {
         <span className={`side-badge ${isBuy ? 'buy' : 'sell'}`}>{trade.originalTrade.side}</span>
         <span className="trade-title">{trade.originalTrade.title}</span>
         <span className={`pnl-badge ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>
-          {pnlPos ? '+' : ''}{formatUSD(trade.unrealizedPnlUSDC)} ({trade.unrealizedPnlPct.toFixed(1)}%)
+          {pnlPos ? '+' : ''}{formatUSD(trade.unrealizedPnlUSDC)} ({formatPercent(trade.unrealizedPnlPct, 1)})
         </span>
       </div>
       <div className="trade-row-meta">
         <span className="trade-outcome">{trade.originalTrade.outcome}</span>
         <span className="stat vol">Paper: {formatUSD(trade.simulatedSizeUSDC)}</span>
-        <span className="stat prob">Entry @ {(trade.entryPrice * 100).toFixed(1)}¢ <span className="estimate-label">(real)</span></span>
+        <span className="stat prob">Entry @ {formatPercent(trade.entryPrice, 1).replace('%', '¢')} <span className="estimate-label">(real)</span></span>
         <span className={`stat prob ${priceChanged ? (pnlPos ? 'price-up' : 'price-down') : ''}`}>
-          Now @ {(trade.currentPrice * 100).toFixed(1)}¢
+          Now @ {formatPercent(trade.currentPrice, 1).replace('%', '¢')}
           {refreshed
             ? <span className="estimate-label"> (live, {refreshed})</span>
             : <span className="estimate-label"> (not refreshed)</span>
@@ -162,7 +162,7 @@ export default function PaperPortfolioPage({ onBack }: Props) {
         </div>
         <div className="wallet-stat">
           <span className={`wallet-stat-val ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>
-            {pnlPos ? '+' : ''}{summary.pnlPct.toFixed(1)}%
+            {pnlPos ? '+' : ''}{formatPercent(summary.pnlPct, 1)}
           </span>
           <span className="wallet-stat-label">Return</span>
         </div>

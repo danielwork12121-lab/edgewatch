@@ -292,6 +292,14 @@
 .category-emoji { font-size: 0.95rem; }
 
 /* ── Section heading ── */
+.homepage-section {
+  margin-bottom: 28px;
+}
+.section-subtitle {
+  font-size: 0.8rem;
+  color: var(--text);
+  margin: 4px 0 0;
+}
 .section-title {
   font-size: 1.1rem;
   font-weight: 600;
@@ -358,6 +366,40 @@
   margin-bottom: 8px;
 }
 .trader-card-actions { margin-top: 10px; }
+.trader-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.hot-trader-card {
+  background: linear-gradient(180deg, rgba(34, 197, 94, 0.04), rgba(34, 197, 94, 0.01));
+}
+.hot-trader-markets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.hot-trader-market {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 100px;
+  background: var(--code-bg);
+  color: var(--text-h);
+  border: 1px solid var(--border);
+}
+.hot-trader-reasons {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hot-trader-reasons li {
+  font-size: 0.78rem;
+  color: var(--text-h);
+}
 
 /* ── Timing bar ── */
 .timing-bar-wrap { margin-bottom: 8px; }

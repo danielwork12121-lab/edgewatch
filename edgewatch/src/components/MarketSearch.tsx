@@ -14,6 +14,7 @@ import {
 } from '../api/polymarket'
 import { CATEGORIES, getCategoryKeywords, type Category } from '../api/categories'
 import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
+import HotTradersFeed from './HotTradersFeed'
 import TraderRanking from './TraderRanking'
 
 interface Props {
@@ -128,6 +129,53 @@ export default function MarketSearch({
   const [isSearchMode, setIsSearchMode] = useState(false)
   const [activeQuery, setActiveQuery] = useState('')
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
+  const [filterTouched, setFilterTouched] = useState(false)
+  const [trendingMarkets, setTrendingMarkets] = useState<PolyEvent[]>([])
+  const [trendingLoading, setTrendingLoading] = useState(true)
+  const [trendingError, setTrendingError] = useState<string | null>(null)
+  const [trendingUpdated, setTrendingUpdated] = useState<number | null>(null)
+
+  const loadTrending = useCallback((forceRefresh = false) => {
+    const key = 'homepage:trending'
+    if (!forceRefresh) {
+      const cached = cacheGet<PolyEvent[]>(key, TTL.markets)
+      if (cached !== null) {
+        setTrendingMarkets(cached)
+        setTrendingError(null)
+        setTrendingUpdated(cacheTime(key))
+        setTrendingLoading(false)
+        devLog('trending cache hit', {
+          apiUrl: marketApiUrl(CATEGORIES[0]),
+          rawCount: cached.length,
+          filteredCount: cached.length,
+          titles: cached.slice(0, 5).map(event => event.title),
+        })
+        return
+      }
+    }
+
+    setTrendingLoading(true)
+    setTrendingError(null)
+    fetchTrending(16)
+      .then(data => {
+        const sorted = [...data].sort((a, b) => {
+          const aVol = toFiniteNumber(a.volume24hr ?? a.volume, 0)
+          const bVol = toFiniteNumber(b.volume24hr ?? b.volume, 0)
+          return bVol - aVol
+        })
+        cacheSet(key, sorted)
+        setTrendingMarkets(sorted)
+        setTrendingUpdated(Date.now())
+        devLog('trending fetch', {
+          apiUrl: marketApiUrl(CATEGORIES[0]),
+          rawCount: data.length,
+          filteredCount: sorted.length,
+          titles: sorted.slice(0, 5).map(event => event.title),
+        })
+      })
+      .catch(e => setTrendingError(e instanceof Error ? e.message : 'Failed to load trending markets'))
+      .finally(() => setTrendingLoading(false))
+  }, [])
 
   // ── Category loader ───────────────────────────────────────────────────────
   const loadCategory = useCallback((cat: Category, forceRefresh = false) => {
@@ -205,6 +253,13 @@ export default function MarketSearch({
     return () => window.clearTimeout(timer)
   }, [loadCategory])
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      loadTrending()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [loadTrending])
+
   // ── Category pill click ───────────────────────────────────────────────────
   const handleCategoryClick = useCallback((cat: Category) => {
     setActiveCategory(cat)
@@ -212,6 +267,7 @@ export default function MarketSearch({
     setQuery('')
     setIsSearchMode(false)
     setActiveQuery('')
+    setFilterTouched(true)
     loadCategory(cat)
   }, [loadCategory])
 
@@ -225,6 +281,7 @@ export default function MarketSearch({
     setTab('markets')
     setIsSearchMode(true)
     setActiveQuery(q)
+    setFilterTouched(true)
 
     const key = `search:${q}`
     const cached = cacheGet<PolyEvent[]>(key, TTL.markets)
@@ -269,6 +326,7 @@ export default function MarketSearch({
     setQuery('')
     setIsSearchMode(false)
     setActiveQuery('')
+    setFilterTouched(activeCategory.id !== 'trending')
     loadCategory(activeCategory)
   }, [activeCategory, loadCategory])
 
@@ -325,121 +383,155 @@ export default function MarketSearch({
             <button type="button" className="nav-link" onClick={onViewPortfolio}>Paper Portfolio</button>
           </div>
         </div>
-        <p className="tagline">Identify and copy high-signal Polymarket traders</p>
+        <p className="tagline">Watch traders first, then use markets and filters to narrow in.</p>
       </header>
 
-      {/* Category selector */}
-      <div className="category-bar">
-        {CATEGORIES.map(cat => (
-          <button
-            key={cat.id}
-            type="button"
-            className={`category-pill ${!isSearchMode && activeCategory.id === cat.id ? 'active' : ''}`}
-            onClick={() => handleCategoryClick(cat)}
-          >
-            <span className="category-emoji">{cat.emoji}</span> {cat.label}
-          </button>
-        ))}
-      </div>
+      <HotTradersFeed onSelectWallet={onSelectWallet} />
 
-      {/* Search form */}
-      <form className="search-form" onSubmit={handleSearch} noValidate>
-        <input
-          className="search-input"
-          type="text"
-          autoFocus
-          autoComplete="off"
-          placeholder="Search: anime, AI, elections, BTC…"
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-        />
-        <button className="search-btn" type="submit" disabled={loading}>
-          {loading && isSearchMode ? '…' : 'Search'}
-        </button>
-        {isSearchMode && (
-          <button type="button" className="back-btn" onClick={clearSearch}>✕ Clear</button>
+      <section className="homepage-section">
+        <div className="section-heading">
+          <div>
+            <h2 className="section-title">Trending Markets</h2>
+            <p className="section-subtitle">Broad market tape from active Polymarket events.</p>
+          </div>
+          <div className="refresh-bar">
+            {trendingUpdated && <span className="last-updated">{formatAge(trendingUpdated)}</span>}
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={() => loadTrending(true)}
+              disabled={trendingLoading}
+              title="Refresh trending markets"
+            >
+              ↻
+            </button>
+          </div>
+        </div>
+        {trendingError && <p className="error-msg">{trendingError}</p>}
+        {trendingLoading && <p className="empty-msg">Loading trending markets…</p>}
+        {!trendingLoading && trendingMarkets.length === 0 && !trendingError && (
+          <p className="empty-msg">No trending markets found.</p>
         )}
-      </form>
+        {trendingMarkets.length > 0 && (
+          <div className="results-grid">
+            {trendingMarkets.slice(0, 8).map(event => (
+              <MarketCard
+                key={event.id}
+                event={event}
+                onClick={() => onSelectEvent(event)}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="homepage-section">
+        <form className="search-form" onSubmit={handleSearch} noValidate>
+          <input
+            className="search-input"
+            type="text"
+            autoComplete="off"
+            placeholder="Search Polymarket: anime, AI, elections, BTC…"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+          />
+          <button className="search-btn" type="submit" disabled={loading}>
+            {loading && isSearchMode ? '…' : 'Search'}
+          </button>
+          {isSearchMode && (
+            <button type="button" className="back-btn" onClick={clearSearch}>✕ Clear</button>
+          )}
+        </form>
+
+        <div className="category-bar">
+          {CATEGORIES.map(cat => (
+            <button
+              key={cat.id}
+              type="button"
+              className={`category-pill ${!isSearchMode && activeCategory.id === cat.id ? 'active' : ''}`}
+              onClick={() => handleCategoryClick(cat)}
+            >
+              <span className="category-emoji">{cat.emoji}</span> {cat.label}
+            </button>
+          ))}
+        </div>
+      </section>
 
       {error && <p className="error-msg">{error}</p>}
 
-      {/* Heading + refresh bar — always visible */}
-      <div className="section-heading">
-        {headingText && <h2 className="section-title">{headingText}</h2>}
-        <div className="refresh-bar">
-          {lastUpdated && (
-            <span className="last-updated">{formatAge(lastUpdated)}</span>
-          )}
-          <button
-            type="button"
-            className="refresh-btn"
-            onClick={handleRefresh}
-            disabled={loading}
-            title="Refresh data"
-          >
-            ↻
-          </button>
-        </div>
-      </div>
+      {filterTouched && (isSearchMode || activeCategory.id !== 'trending') && (
+        <section className="homepage-section">
+          <div className="section-heading">
+            {headingText && <h2 className="section-title">{headingText}</h2>}
+            <div className="refresh-bar">
+              {lastUpdated && <span className="last-updated">{formatAge(lastUpdated)}</span>}
+              <button
+                type="button"
+                className="refresh-btn"
+                onClick={handleRefresh}
+                disabled={loading}
+                title="Refresh data"
+              >
+                ↻
+              </button>
+            </div>
+          </div>
 
-      {/* Tabs */}
-      {results.length > 0 && !loading && (
-        <div className="tab-bar">
-          <button
-            type="button"
-            className={`tab-btn ${tab === 'markets' ? 'active' : ''}`}
-            onClick={() => setTab('markets')}
-          >
-            Markets ({results.length})
-          </button>
-          <button
-            type="button"
-            className={`tab-btn ${tab === 'traders' ? 'active' : ''}`}
-            onClick={() => setTab('traders')}
-          >
-            {isSearchMode
-              ? `Top Traders for "${activeQuery}"`
-              : `Top ${activeCategory.label} Traders`}
-          </button>
-        </div>
-      )}
-
-      {/* Market grid */}
-      {tab === 'markets' && (
-        <>
-          {loading && <p className="empty-msg">Loading…</p>}
-          {!loading && results.length === 0 && !error && (
-            <p className="empty-msg">
-              {isSearchMode
-                ? `No relevant markets found for "${activeQuery}".`
-                : activeCategory.id === 'trending'
-                  ? 'No trending markets found.'
-                  : `No relevant ${activeCategory.label} markets found.`}
-            </p>
-          )}
-          {results.length > 0 && (
-            <div className="results-grid">
-              {results.map(event => (
-                <MarketCard
-                  key={event.id}
-                  event={event}
-                  onClick={() => onSelectEvent(event)}
-                />
-              ))}
+          {results.length > 0 && !loading && (
+            <div className="tab-bar">
+              <button
+                type="button"
+                className={`tab-btn ${tab === 'markets' ? 'active' : ''}`}
+                onClick={() => setTab('markets')}
+              >
+                Markets ({results.length})
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${tab === 'traders' ? 'active' : ''}`}
+                onClick={() => setTab('traders')}
+              >
+                {isSearchMode
+                  ? `Top Traders for "${activeQuery}"`
+                  : `Top ${activeCategory.label} Traders`}
+              </button>
             </div>
           )}
-        </>
-      )}
 
-      {/* Trader ranking */}
-      {tab === 'traders' && results.length > 0 && (
-        <TraderRanking
-          key={results.map(event => event.id).join(',')}
-          events={results}
-          categoryLabel={isSearchMode ? `"${activeQuery}"` : activeCategory.label}
-          onSelectWallet={onSelectWallet}
-          autoLoad
-        />
+          {tab === 'markets' && (
+            <>
+              {loading && <p className="empty-msg">Loading…</p>}
+              {!loading && results.length === 0 && !error && (
+                <p className="empty-msg">
+                  {isSearchMode
+                    ? `No active ${activeQuery} markets found on Polymarket right now.`
+                    : `No relevant active ${activeCategory.label} markets found.`}
+                </p>
+              )}
+              {results.length > 0 && (
+                <div className="results-grid">
+                  {results.map(event => (
+                    <MarketCard
+                      key={event.id}
+                      event={event}
+                      onClick={() => onSelectEvent(event)}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === 'traders' && results.length > 0 && (
+            <TraderRanking
+              key={results.map(event => event.id).join(',')}
+              events={results}
+              categoryLabel={isSearchMode ? `"${activeQuery}"` : activeCategory.label}
+              onSelectWallet={onSelectWallet}
+              autoLoad
+            />
+          )}
+        </section>
       )}
     </div>
   )

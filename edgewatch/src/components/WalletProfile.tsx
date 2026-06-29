@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { WalletTrade, WalletPosition } from '../types'
 import { getWalletActivity, getWalletPositions, filterNoise, truncateAddress } from '../api/wallets'
-import { formatUSD, formatDate } from '../api/polymarket'
+import { formatUSD, formatDate, formatPercent, toFiniteNumber } from '../api/polymarket'
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
@@ -77,7 +77,7 @@ function TradeRow({
       <div className="trade-row-meta">
         <span className="trade-outcome">{trade.outcome}</span>
         <span className="stat vol">{formatUSD(trade.usdcSize ?? 0)}</span>
-        <span className="stat prob">@ {((trade.price ?? 0) * 100).toFixed(0)}¢</span>
+        <span className="stat prob">@ {formatPercent(trade.price, 0).replace('%', '¢')}</span>
         <span className="stat date">{time}</span>
       </div>
       {chartOpen && tokenId && (
@@ -275,7 +275,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             {winRate !== null && (
               <div className="wallet-stat">
                 <span className={`wallet-stat-val ${winRate >= 0.5 ? 'pnl-pos' : 'pnl-neg'}`}>
-                  {(winRate * 100).toFixed(0)}%
+                  {formatPercent(winRate, 0)}
                 </span>
                 <span className="wallet-stat-label">Win Rate</span>
               </div>
@@ -342,7 +342,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
                       </div>
                       <div className="trade-row-meta">
                         <span className="trade-outcome">{pos.outcome}</span>
-                        <span className="stat vol">{pos.size.toFixed(0)} shares @ {((pos.avgPrice ?? 0) * 100).toFixed(0)}¢</span>
+                        <span className="stat vol">{toFiniteNumber(pos.size, 0).toFixed(0)} shares @ {formatPercent(pos.avgPrice, 0).replace('%', '¢')}</span>
                         <span className="stat date">Closes {formatDate(pos.endDate)}</span>
                       </div>
                     </div>
