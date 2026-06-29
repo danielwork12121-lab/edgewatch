@@ -5,13 +5,15 @@ import {
   searchEvents,
   fetchTrending,
   searchByTag,
+  filterEventsByKeywords,
+  filterEventsByQuery,
   parseOutcomePrices,
   formatUSD,
   formatPercent,
   timeRemaining,
   volatilityInfo,
 } from '../api/polymarket'
-import { CATEGORIES, type Category } from '../api/categories'
+import { CATEGORIES, getCategoryKeywords, type Category } from '../api/categories'
 import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
 import TraderRanking from './TraderRanking'
 
@@ -23,6 +25,45 @@ interface Props {
 }
 
 type DiscoveryTab = 'markets' | 'traders'
+
+const devLog = (...args: unknown[]) => {
+  if (import.meta.env.DEV) console.debug('[EdgeWatch]', ...args)
+}
+
+function marketApiUrl(category: Category, query?: string) {
+  if (query) {
+    const params = new URLSearchParams({
+      q: query,
+      active: 'true',
+      closed: 'false',
+      limit: '24',
+      order: 'volume',
+      ascending: 'false',
+    })
+    return `https://gamma-api.polymarket.com/events?${params}`
+  }
+
+  if (category.tag) {
+    const params = new URLSearchParams({
+      tag: category.tag,
+      active: 'true',
+      closed: 'false',
+      limit: '24',
+      order: 'volume',
+      ascending: 'false',
+    })
+    return `https://gamma-api.polymarket.com/events?${params}`
+  }
+
+  const params = new URLSearchParams({
+    active: 'true',
+    closed: 'false',
+    limit: '16',
+    order: 'volume',
+    ascending: 'false',
+  })
+  return `https://gamma-api.polymarket.com/events?${params}`
+}
 
 function MarketCard({ event, onClick }: { event: PolyEvent; onClick: () => void }) {
   const m = event.markets?.[0]
@@ -82,14 +123,22 @@ export default function MarketSearch({
 
   // ── Category loader ───────────────────────────────────────────────────────
   const loadCategory = useCallback((cat: Category, forceRefresh = false) => {
-    const key = cat.tag ? `category:${cat.tag}` : 'trending'
+    const key = `category:${cat.id}`
 
     if (!forceRefresh) {
       const cached = cacheGet<PolyEvent[]>(key, TTL.markets)
       if (cached !== null) {
         setResults(cached)
+        setError(null)
         setLastUpdated(cacheTime(key))
         setLoading(false)
+        devLog('category cache hit', {
+          category: cat.id,
+          apiUrl: marketApiUrl(cat),
+          rawCount: cached.length,
+          filteredCount: cached.length,
+          titles: cached.slice(0, 5).map(event => event.title),
+        })
         return
       }
     }
@@ -97,12 +146,21 @@ export default function MarketSearch({
     setLoading(true)
     setError(null)
     setResults([])
+    const keywords = cat.id === 'trending' ? [] : getCategoryKeywords(cat.id)
     const fetch = cat.tag ? searchByTag(cat.tag, 24) : fetchTrending(16)
     fetch
       .then(data => {
-        cacheSet(key, data)
-        setResults(data)
+        const filtered = cat.id === 'trending' ? data : filterEventsByKeywords(data, keywords)
+        cacheSet(key, filtered)
+        setResults(filtered)
         setLastUpdated(Date.now())
+        devLog('category fetch', {
+          category: cat.id,
+          apiUrl: marketApiUrl(cat),
+          rawCount: data.length,
+          filteredCount: filtered.length,
+          titles: filtered.slice(0, 5).map(event => event.title),
+        })
       })
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load markets'))
       .finally(() => setLoading(false))
@@ -140,8 +198,16 @@ export default function MarketSearch({
     const cached = cacheGet<PolyEvent[]>(key, TTL.markets)
     if (cached !== null) {
       setResults(cached)
+      setError(null)
       setLastUpdated(cacheTime(key))
       setLoading(false)
+      devLog('search cache hit', {
+        query: q,
+        apiUrl: marketApiUrl(activeCategory, q),
+        rawCount: cached.length,
+        filteredCount: cached.length,
+        titles: cached.slice(0, 5).map(event => event.title),
+      })
       return
     }
 
@@ -150,13 +216,21 @@ export default function MarketSearch({
     setResults([])
     searchEvents(q)
       .then(data => {
-        cacheSet(key, data)
-        setResults(data)
+        const filtered = filterEventsByQuery(data, q)
+        cacheSet(key, filtered)
+        setResults(filtered)
         setLastUpdated(Date.now())
+        devLog('search fetch', {
+          query: q,
+          apiUrl: marketApiUrl(activeCategory, q),
+          rawCount: data.length,
+          filteredCount: filtered.length,
+          titles: filtered.slice(0, 5).map(event => event.title),
+        })
       })
       .catch(err => setError(err instanceof Error ? err.message : 'Search failed'))
       .finally(() => setLoading(false))
-  }, [query])
+  }, [query, activeCategory])
 
   // ── Clear search ──────────────────────────────────────────────────────────
   const clearSearch = useCallback(() => {
@@ -175,26 +249,38 @@ export default function MarketSearch({
       setError(null)
       setResults([])
       searchEvents(activeQuery)
-        .then(data => { cacheSet(key, data); setResults(data); setLastUpdated(Date.now()) })
+        .then(data => {
+          const filtered = filterEventsByQuery(data, activeQuery)
+          cacheSet(key, filtered)
+          setResults(filtered)
+          setLastUpdated(Date.now())
+          devLog('search refresh', {
+            query: activeQuery,
+            apiUrl: marketApiUrl(activeCategory, activeQuery),
+            rawCount: data.length,
+            filteredCount: filtered.length,
+            titles: filtered.slice(0, 5).map(event => event.title),
+          })
+        })
         .catch(err => setError(err instanceof Error ? err.message : 'Search failed'))
         .finally(() => setLoading(false))
     } else {
-      const key = activeCategory.tag ? `category:${activeCategory.tag}` : 'trending'
+      const key = `category:${activeCategory.id}`
       cacheInvalidate(key)
       loadCategory(activeCategory, true)
     }
   }, [isSearchMode, activeQuery, activeCategory, loadCategory])
 
   // ── Heading ───────────────────────────────────────────────────────────────
-  let headingText: string
+  let headingText: string | null = null
   if (loading) {
     headingText = isSearchMode ? `Searching "${activeQuery}"…` : 'Loading markets…'
-  } else if (isSearchMode) {
-    headingText = `Results for "${activeQuery}" — ${results.length} market${results.length !== 1 ? 's' : ''}`
-  } else if (activeCategory.id === 'trending') {
+  } else if (isSearchMode && results.length > 0) {
+    headingText = `Results for "${activeQuery}" — ${results.length} relevant market${results.length !== 1 ? 's' : ''}`
+  } else if (!isSearchMode && activeCategory.id === 'trending' && results.length > 0) {
     headingText = '🔥 Trending Markets'
-  } else {
-    headingText = `${activeCategory.emoji} ${activeCategory.label} Markets`
+  } else if (!isSearchMode && activeCategory.id !== 'trending' && results.length > 0) {
+    headingText = `${activeCategory.emoji} ${activeCategory.label} Markets (${results.length} relevant)`
   }
 
   return (
@@ -247,7 +333,7 @@ export default function MarketSearch({
 
       {/* Heading + refresh bar — always visible */}
       <div className="section-heading">
-        <h2 className="section-title">{headingText}</h2>
+        {headingText && <h2 className="section-title">{headingText}</h2>}
         <div className="refresh-bar">
           {lastUpdated && (
             <span className="last-updated">{formatAge(lastUpdated)}</span>
@@ -293,8 +379,10 @@ export default function MarketSearch({
           {!loading && results.length === 0 && !error && (
             <p className="empty-msg">
               {isSearchMode
-                ? `No active markets found for "${activeQuery}".`
-                : 'No markets found.'}
+                ? `No relevant markets found for "${activeQuery}".`
+                : activeCategory.id === 'trending'
+                  ? 'No trending markets found.'
+                  : `No relevant ${activeCategory.label} markets found.`}
             </p>
           )}
           {results.length > 0 && (

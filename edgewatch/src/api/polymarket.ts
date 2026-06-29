@@ -116,6 +116,67 @@ export function formatPercent(value: unknown, digits = 0): string {
   return `${(n * 100).toFixed(digits)}%`
 }
 
+function normalizeText(value: unknown): string {
+  if (typeof value === 'string') return value.toLowerCase()
+  if (Array.isArray(value)) return value.map(normalizeText).join(' ')
+  if (value && typeof value === 'object') return Object.values(value as Record<string, unknown>).map(normalizeText).join(' ')
+  return String(value ?? '').toLowerCase()
+}
+
+export function getEventSearchText(event: PolyEvent): string {
+  const markets = Array.isArray(event.markets) ? event.markets : []
+  const marketText = markets
+    .flatMap(market => [
+      market.question,
+      market.slug,
+      market.outcomes,
+      market.outcomePrices,
+      market.clobTokenIds,
+      market.conditionId,
+      (market as { description?: unknown }).description,
+    ])
+    .map(normalizeText)
+    .join(' ')
+
+  const eventText = [
+    event.title,
+    event.slug,
+    event.image,
+    event.icon,
+    event.startDate,
+    event.endDate,
+    (event as { description?: unknown }).description,
+    event.tags?.map(tag => [tag.label, tag.slug, tag.id].filter(Boolean).join(' ')).join(' '),
+    marketText,
+  ]
+    .map(normalizeText)
+    .join(' ')
+
+  return eventText.replace(/\s+/g, ' ').trim()
+}
+
+export function filterEventsByKeywords(events: PolyEvent[], keywords: string[]): PolyEvent[] {
+  if (keywords.length === 0) return events
+  const lowered = keywords.map(keyword => keyword.toLowerCase())
+  return events.filter(event => {
+    const text = getEventSearchText(event)
+    return lowered.some(keyword => text.includes(keyword))
+  })
+}
+
+export function filterEventsByQuery(events: PolyEvent[], query: string): PolyEvent[] {
+  const terms = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map(term => term.trim())
+    .filter(term => term.length >= 2)
+  if (terms.length === 0) return []
+  return events.filter(event => {
+    const text = getEventSearchText(event)
+    return terms.every(term => text.includes(term))
+  })
+}
+
 export function formatDate(iso: string | null): string {
   if (!iso) return '—'
   const d = new Date(iso)
