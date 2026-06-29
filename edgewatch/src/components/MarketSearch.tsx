@@ -4,7 +4,6 @@ import {
   toFiniteNumber,
   searchEvents,
   fetchTrending,
-  searchByTag,
   filterEventsByKeywords,
   filterEventsByQuery,
   parseOutcomePrices,
@@ -63,6 +62,15 @@ function marketApiUrl(category: Category, query?: string) {
     ascending: 'false',
   })
   return `https://gamma-api.polymarket.com/events?${params}`
+}
+
+function uniqueEvents(events: PolyEvent[]): PolyEvent[] {
+  const seen = new Set<string>()
+  return events.filter(event => {
+    if (seen.has(event.id)) return false
+    seen.add(event.id)
+    return true
+  })
 }
 
 function MarketCard({ event, onClick }: { event: PolyEvent; onClick: () => void }) {
@@ -124,6 +132,11 @@ export default function MarketSearch({
   // ── Category loader ───────────────────────────────────────────────────────
   const loadCategory = useCallback((cat: Category, forceRefresh = false) => {
     const key = `category:${cat.id}`
+    const keywords = cat.id === 'trending' ? [] : getCategoryKeywords(cat.id)
+    const seedTerms = cat.id === 'trending'
+      ? []
+      : keywords.slice(0, 4)
+    const requestUrls = seedTerms.map(term => marketApiUrl(cat, term))
 
     if (!forceRefresh) {
       const cached = cacheGet<PolyEvent[]>(key, TTL.markets)
@@ -134,7 +147,7 @@ export default function MarketSearch({
         setLoading(false)
         devLog('category cache hit', {
           category: cat.id,
-          apiUrl: marketApiUrl(cat),
+          apiUrl: requestUrls,
           rawCount: cached.length,
           filteredCount: cached.length,
           titles: cached.slice(0, 5).map(event => event.title),
@@ -146,20 +159,39 @@ export default function MarketSearch({
     setLoading(true)
     setError(null)
     setResults([])
-    const keywords = cat.id === 'trending' ? [] : getCategoryKeywords(cat.id)
-    const fetch = cat.tag ? searchByTag(cat.tag, 24) : fetchTrending(16)
-    fetch
+    const fetchCategory = async () => {
+      if (cat.id === 'trending') {
+        const data = await fetchTrending(16)
+        return data
+      }
+
+      if (seedTerms.length === 0) return []
+
+      const batches = await Promise.allSettled(
+        seedTerms.map(term => searchEvents(term))
+      )
+      return uniqueEvents(
+        batches.flatMap(result => result.status === 'fulfilled' ? result.value : [])
+      )
+    }
+
+    fetchCategory()
       .then(data => {
         const filtered = cat.id === 'trending' ? data : filterEventsByKeywords(data, keywords)
-        cacheSet(key, filtered)
-        setResults(filtered)
+        const sorted = [...filtered].sort((a, b) => {
+          const aVol = toFiniteNumber(a.volume24hr ?? a.volume, 0)
+          const bVol = toFiniteNumber(b.volume24hr ?? b.volume, 0)
+          return bVol - aVol
+        })
+        cacheSet(key, sorted)
+        setResults(sorted)
         setLastUpdated(Date.now())
         devLog('category fetch', {
           category: cat.id,
-          apiUrl: marketApiUrl(cat),
+          apiUrl: requestUrls,
           rawCount: data.length,
-          filteredCount: filtered.length,
-          titles: filtered.slice(0, 5).map(event => event.title),
+          filteredCount: sorted.length,
+          titles: sorted.slice(0, 5).map(event => event.title),
         })
       })
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load markets'))
