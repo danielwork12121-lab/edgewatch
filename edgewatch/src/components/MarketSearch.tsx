@@ -14,8 +14,7 @@ import {
 } from '../api/polymarket'
 import { CATEGORIES, getCategoryKeywords, type Category } from '../api/categories'
 import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
-import ReliableCandidatesFeed from './ReliableCandidatesFeed'
-import HotTradersFeed from './HotTradersFeed'
+import CopyCandidateDiscoveryFeed from './CopyCandidateDiscoveryFeed'
 import TraderRanking from './TraderRanking'
 
 interface Props {
@@ -387,9 +386,7 @@ export default function MarketSearch({
         <p className="tagline">Watch traders first, then use markets and filters to narrow in.</p>
       </header>
 
-      <ReliableCandidatesFeed onSelectWallet={onSelectWallet} />
-
-      <HotTradersFeed onSelectWallet={onSelectWallet} />
+      <CopyCandidateDiscoveryFeed onSelectWallet={onSelectWallet} />
 
       <section className="homepage-section">
         <div className="section-heading">
