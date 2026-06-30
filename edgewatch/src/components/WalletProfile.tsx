@@ -5,6 +5,8 @@ import { formatUSD, formatDate, formatPercent, toFiniteNumber } from '../api/pol
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
 import { batchFetchPrices } from '../api/priceTracker'
 import { analyzeTraderReliability } from '../api/traders'
+import { assessPositionFollowability, computeRepeatableTraderQuality } from '../api/traderQuality'
+import { getClosedPositions } from '../api/wallets'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
 import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
@@ -184,6 +186,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
   const [livePrices, setLivePrices] = useState<Map<string, number>>(new Map())
   const [positionsError, setPositionsError] = useState<string | null>(null)
+  const [closedPositions, setClosedPositions] = useState<Awaited<ReturnType<typeof getClosedPositions>>>([])
 
   const actKey = `wallet:${address}:activity`
   const posKey = `wallet:${address}:positions`
@@ -207,8 +210,9 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
     Promise.allSettled([
       getWalletActivity(address, 200),
       getWalletPositions(address, 100),
+      getClosedPositions(address, 100),
     ])
-      .then(([actsResult, posResult]) => {
+      .then(([actsResult, posResult, closedResult]) => {
         if (actsResult.status === 'fulfilled') {
           cacheSet(actKey, actsResult.value)
           setTrades(actsResult.value)
@@ -223,6 +227,12 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
         } else {
           setPositions([])
           setPositionsError('Current positions unavailable from public API.')
+        }
+
+        if (closedResult.status === 'fulfilled') {
+          setClosedPositions(closedResult.value)
+        } else {
+          setClosedPositions([])
         }
         setLastUpdated(Date.now())
       })
@@ -305,6 +315,13 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   }, [filtered])
 
   const reliability = analyzeTraderReliability(filtered, positions, livePrices)
+  const traderQuality = computeRepeatableTraderQuality({
+    trades: filtered,
+    recentTrades: filtered.slice(0, 40),
+    positions,
+    closedPositions,
+    priceMap: livePrices,
+  })
 
   const positionsWithValue = positions.filter(p => (p.initialValue ?? 0) > 0)
   const realizedPnl = positions.reduce((s, p) => s + (p.realizedPnl ?? 0), 0)
@@ -312,10 +329,8 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const wins = positionsWithValue.filter(p => (p.cashPnl ?? 0) >= 0).length
   const winRate = positionsWithValue.length > 0 ? wins / positionsWithValue.length : null
   const activePositions = positions.filter(p => (p.initialValue ?? 0) > 0 || (p.currentValue ?? 0) > 0 || p.redeemable === false)
-  const copyRiskLabel =
-    reliability?.copySignal === 'COPY' ? 'Copy risk: low' :
-    reliability?.copySignal === 'WATCH' ? 'Copy risk: watch only' :
-    'Copy risk: do not copy yet'
+  const positionFollowLabel = (position: WalletPosition) =>
+    assessPositionFollowability(position, traderQuality)
 
   return (
     <div className="detail-page">
@@ -379,7 +394,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
                   <CurrentPositionRow
                     key={position.asset}
                     position={position}
-                    copyRiskLabel={copyRiskLabel}
+                    copyRiskLabel={positionFollowLabel(position)}
                   />
                 ))}
                 {activePositions.length > 12 && (
@@ -446,14 +461,22 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
           </p>
 
           <div className="data-source-label" style={{ marginBottom: 16 }}>
-            <strong>{reliability?.reliabilityLabel ?? 'Active but unreliable'}</strong>
+            <strong>{traderQuality.tier === 'reliable' ? 'Reliable candidate' : traderQuality.tier === 'watch' ? 'Strong watch candidate' : traderQuality.tier === 'emerging' ? 'Emerging trader' : traderQuality.rejectionReason || reliability?.reliabilityLabel}</strong>
             {' · '}
-            Reliability {reliability?.reliabilityScore ?? 0}/100
+            Quality {traderQuality.qualityScore}/100
             {' · '}
-            Copy signal {reliability?.copySignal ?? 'IGNORE'}
-            {reliability?.currentLosingStreak ? ` · Losing streak ${reliability.currentLosingStreak}` : ''}
-            {reliability?.worstLosingStreak ? ` · Worst loss streak ${reliability.worstLosingStreak}` : ''}
+            {traderQuality.backtest.label}
+            {traderQuality.luckyWinRisk ? ' · Lucky win risk flagged' : ''}
+            {traderQuality.outlierDriven ? ' · Outlier-driven profit' : ''}
           </div>
+
+          {traderQuality.plainReasons.length > 0 && (
+            <ul className="hot-trader-reasons" style={{ marginBottom: 16 }}>
+              {traderQuality.plainReasons.map((reason, index) => (
+                <li key={index}>{reason}</li>
+              ))}
+            </ul>
+          )}
 
           {/* ── Tabs ── */}
           <div className="tab-bar">

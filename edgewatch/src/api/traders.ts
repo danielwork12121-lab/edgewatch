@@ -1,17 +1,27 @@
-import type { PolyEvent, WalletTrade, TraderRankEntry } from '../types'
-import { getMarketTrades, getWalletActivity, getWalletPositions, truncateAddress } from './wallets'
+import type { PolyEvent, WalletTrade, WalletPosition, TraderRankEntry } from '../types'
+import { getClosedPositions, getMarketHolders, getMarketTrades, getWalletActivity, getWalletPositions, truncateAddress } from './wallets'
 import { formatUSD, fetchTrending, searchEvents, toFiniteNumber } from './polymarket'
 import { batchFetchPrices } from './priceTracker'
 import { cacheGet, cacheSet, TTL } from './cache'
+import {
+  categorizeQualityRejection,
+  computeRepeatableTraderQuality,
+  summarizeActiveBets,
+  type ActiveBetSummary,
+  type CandidateTier,
+  type FollowBacktest,
+} from './traderQuality'
 
 export interface HotTraderEntry {
   address: string
   label: string
   pseudonym: string
   name: string
-  candidateTier: 'reliable' | 'watch' | 'ignored'
+  candidateTier: CandidateTier
   hotScore: number
   reliabilityScore: number
+  qualityScore: number
+  recentQualityScore: number
   copySignal: 'COPY' | 'WATCH' | 'IGNORE'
   confidence: 'Low' | 'Medium' | 'High'
   recentTradeCount: number
@@ -28,11 +38,20 @@ export interface HotTraderEntry {
   timingEdge: number | null
   pnl: number | null
   winRate: number | null
+  profitFactor: number | null
+  roi: number | null
+  pnlExcludingLargestWin: number | null
+  luckyWinRisk: boolean
+  outlierDriven: boolean
   reliabilityLabel: string
   reliabilityReasons: string[]
+  plainReasons: string[]
   scoreReasons: string[]
   isReliableCandidate: boolean
   historicalTradeCount: number
+  candidateSource: string
+  activeBets: ActiveBetSummary[]
+  backtest: FollowBacktest
   rejectionReason?: string
 }
 
@@ -53,11 +72,13 @@ export interface CopyDiscoverySummary {
   enrichedWallets: number
   reliableCandidates: number
   watchCandidates: number
+  emergingCandidates: number
   ignoredActiveTraders: number
   scanSource: string
   apiNote: string | null
   emptyReasons: string[]
   rejectionBreakdown: Record<string, number>
+  sourceLabels: string[]
 }
 
 export interface CopyDiscoveryDiagnostics extends HotTraderDiagnostics {
@@ -75,6 +96,7 @@ export interface CopyDiscoveryResult {
   message: string
   reliable: HotTraderEntry[]
   watchlist: HotTraderEntry[]
+  emerging: HotTraderEntry[]
   ignored: HotTraderEntry[]
   nearMisses: NearMissEntry[]
   summary: CopyDiscoverySummary
@@ -541,179 +563,84 @@ export function analyzeTraderReliability(
   }
 }
 
-type WatchRejectionCategory =
-  | 'hard_fail'
-  | 'too_little_history'
-  | 'negative_pnl'
-  | 'poor_win_rate'
-  | 'severe_losing_streak'
-  | 'weak_sample'
-  | 'low_reliability'
-  | 'no_promising_signal'
-  | 'concentration_risk'
-
-interface WatchlistEvaluation {
-  eligible: boolean
-  rejectionReason: string
-  rejectionCategory: WatchRejectionCategory | null
-}
-
-function evaluateWatchlistCandidate(
-  agg: HotWalletAgg,
-  reliability: TraderReliability,
-  timingEdgePct: number | null,
-  marketsTraded: number,
-): WatchlistEvaluation {
-  const recentTrades = agg.trades.length
-  const historicalTrades = reliability.sampleSize
-  const livePricedTrades = reliability.winCount + reliability.lossCount
-  const realizedPnl = reliability.realizedPnl
-  const profitFactor = reliability.profitFactor
-
-  const reject = (
-    reason: string,
-    category: WatchRejectionCategory,
-  ): WatchlistEvaluation => ({ eligible: false, rejectionReason: reason, rejectionCategory: category })
-
-  if (reliability.isReliableCandidate) {
-    return { eligible: false, rejectionReason: 'Already copy-ready', rejectionCategory: null }
-  }
-
-  if (reliability.hardFailReasons.length > 0) {
-    return reject(reliability.hardFailReasons[0], 'hard_fail')
-  }
-
-  if (realizedPnl !== null && realizedPnl < 0 && (profitFactor ?? 0) <= 1.1) {
-    return reject('Negative realized PnL with weak profit factor', 'negative_pnl')
-  }
-  if (reliability.resolvedPositions < 10) {
-    return reject('Too few closed positions (<10)', 'too_little_history')
-  }
-  if (recentTrades < 5) {
-    return reject(`Too few recent trades (${recentTrades} < 5)`, 'weak_sample')
-  }
-  if (marketsTraded < 2) {
-    return reject(`Too few unique markets (${marketsTraded} < 2)`, 'weak_sample')
-  }
-  if (reliability.winRate !== null && reliability.winRate < 0.45) {
-    return reject(`Win rate below 45% (${(reliability.winRate * 100).toFixed(0)}%)`, 'poor_win_rate')
-  }
-  if (reliability.reliabilityScore < 55) {
-    return reject(`Reliability too low (${reliability.reliabilityScore}/100)`, 'low_reliability')
-  }
-  if (reliability.currentLosingStreak >= 4) {
-    return reject(`Current losing streak (${reliability.currentLosingStreak})`, 'severe_losing_streak')
-  }
-  if (reliability.worstLosingStreak >= 10) {
-    return reject(`Worst losing streak (${reliability.worstLosingStreak})`, 'severe_losing_streak')
-  }
-
-  if (recentTrades < 10 && historicalTrades < 20) {
-    return reject('Insufficient history (need 10+ recent or 20+ historical trades)', 'too_little_history')
-  }
-  if (marketsTraded < 3) {
-    return reject(`Need 3+ unique markets (has ${marketsTraded})`, 'weak_sample')
-  }
-  if (realizedPnl !== null && realizedPnl < -50) {
-    return reject(`Realized PnL too negative (${formatUSD(realizedPnl)})`, 'negative_pnl')
-  }
-  if (reliability.hardFailReasons.includes('Ignored: one big win risk')) {
-    return reject('One lucky trade concentration risk', 'concentration_risk')
-  }
-
-  const noSevereFlags =
-    reliability.currentLosingStreak < 4 &&
-    reliability.worstLosingStreak < 10 &&
-    (realizedPnl === null || realizedPnl >= -50)
-
-  const hasPromisingSignal =
-    (realizedPnl !== null && realizedPnl >= 500) ||
-    (profitFactor !== null && profitFactor >= 1.25 && reliability.resolvedPositions >= 20) ||
-    (reliability.winRate !== null && reliability.winRate >= 0.55 && reliability.resolvedPositions >= 20) ||
-    (timingEdgePct !== null && timingEdgePct >= 58 && livePricedTrades >= 20) ||
-    (agg.volume >= 5000 && noSevereFlags && (realizedPnl === null || realizedPnl >= 0))
-
-  if (!hasPromisingSignal) {
-    return reject('No promising performance signal met', 'no_promising_signal')
-  }
-
-  return { eligible: true, rejectionReason: '', rejectionCategory: null }
-}
-
 function buildRejectionBreakdown(entries: HotTraderEntry[]): Record<string, number> {
   const breakdown: Record<string, number> = {}
   for (const entry of entries) {
     if (!entry.rejectionReason) continue
-    const category = categorizeRejectionReason(entry.rejectionReason)
+    const category = categorizeQualityRejection(entry.rejectionReason)
     breakdown[category] = (breakdown[category] ?? 0) + 1
   }
   return breakdown
 }
 
-function categorizeRejectionReason(reason: string): string {
-  const lower = reason.toLowerCase()
-  if (lower.includes('win rate')) return 'poor_win_rate'
-  if (lower.includes('pnl') || lower.includes('profit factor')) return 'negative_pnl'
-  if (lower.includes('streak')) return 'severe_losing_streak'
-  if (lower.includes('reliability')) return 'low_reliability'
-  if (lower.includes('history') || lower.includes('closed position')) return 'too_little_history'
-  if (lower.includes('recent trade') || lower.includes('market')) return 'weak_sample'
-  if (lower.includes('concentration') || lower.includes('lucky')) return 'concentration_risk'
-  if (lower.includes('promising') || lower.includes('signal')) return 'no_promising_signal'
-  if (lower.startsWith('ignored:')) return 'hard_fail'
-  return 'other'
-}
-
 function buildNearMisses(ignored: HotTraderEntry[], limit = 5): NearMissEntry[] {
   return [...ignored]
     .filter(entry => entry.rejectionReason)
-    .sort((a, b) => b.reliabilityScore - a.reliabilityScore)
+    .sort((a, b) => b.qualityScore - a.qualityScore)
     .slice(0, limit)
     .map(entry => ({
       address: entry.address,
       label: entry.label,
-      reliabilityScore: entry.reliabilityScore,
+      reliabilityScore: entry.qualityScore,
       winRate: entry.winRate,
       realizedPnl: entry.realizedPnl,
       tradeCount: Math.max(entry.recentTradeCount, entry.historicalTradeCount),
-      rejectionReason: entry.rejectionReason ?? 'Did not meet watchlist gates',
+      rejectionReason: entry.rejectionReason ?? 'Did not meet quality gates',
     }))
 }
 
-function applyDiscoveryTier(
+function applyQualityToEntry(
   entry: HotTraderEntry,
-  agg: HotWalletAgg,
-  reliability: TraderReliability,
-  marketsTraded: number,
+  quality: ReturnType<typeof computeRepeatableTraderQuality>,
+  candidateSource: string,
+  positions: WalletPosition[],
 ): HotTraderEntry {
-  if (reliability.isReliableCandidate) {
-    return {
-      ...entry,
-      candidateTier: 'reliable',
-      copySignal: 'COPY',
-      reliabilityLabel: 'Reliable candidate',
-      isReliableCandidate: true,
-    }
-  }
+  const copySignal =
+    quality.tier === 'reliable' ? 'COPY' as const :
+    quality.tier === 'watch' || quality.tier === 'emerging' ? 'WATCH' as const :
+    'IGNORE' as const
 
-  const watchEval = evaluateWatchlistCandidate(agg, reliability, entry.timingEdge, marketsTraded)
+  const reliabilityLabel =
+    quality.tier === 'reliable' ? 'Reliable candidate' :
+    quality.tier === 'watch' ? 'Strong watch candidate' :
+    quality.tier === 'emerging' ? 'Emerging trader — limited evidence' :
+    quality.rejectionReason || 'Rejected'
 
-  if (watchEval.eligible) {
-    return {
-      ...entry,
-      candidateTier: 'watch',
-      copySignal: 'WATCH',
-      reliabilityLabel: 'Watch candidate',
-      isReliableCandidate: false,
-    }
-  }
+  const activeBets =
+    quality.tier === 'reliable' || quality.tier === 'watch'
+      ? summarizeActiveBets(positions, quality)
+      : []
 
   return {
     ...entry,
-    candidateTier: 'ignored',
-    copySignal: 'IGNORE',
-    isReliableCandidate: false,
-    rejectionReason: watchEval.rejectionReason || reliability.hardFailReasons[0] || 'Did not meet watchlist gates',
+    candidateTier: quality.tier,
+    copySignal,
+    reliabilityScore: quality.qualityScore,
+    qualityScore: quality.qualityScore,
+    recentQualityScore: quality.recentQualityScore,
+    realizedPnl: quality.realizedPnl,
+    openValue: quality.openValue,
+    totalPnl: quality.realizedPnl + positions.reduce((s, p) => s + toFiniteNumber(p.cashPnl, 0), 0),
+    resolvedPositions: quality.closedPositions,
+    currentLosingStreak: quality.currentLosingStreak,
+    worstLosingStreak: quality.worstLosingStreak,
+    winRate: quality.winRate,
+    profitFactor: quality.profitFactor,
+    roi: quality.roi,
+    pnlExcludingLargestWin: quality.pnlExcludingLargestWin,
+    luckyWinRisk: quality.luckyWinRisk,
+    outlierDriven: quality.outlierDriven,
+    timingEdge: quality.timingEdgePct,
+    pnl: quality.realizedPnl,
+    reliabilityLabel,
+    reliabilityReasons: quality.plainReasons,
+    plainReasons: quality.plainReasons,
+    scoreReasons: quality.plainReasons,
+    isReliableCandidate: quality.tier === 'reliable',
+    candidateSource,
+    activeBets,
+    backtest: quality.backtest,
+    rejectionReason: quality.tier === 'ignored' ? quality.rejectionReason : undefined,
   }
 }
 
@@ -732,13 +659,24 @@ function dedupeNormalizedTrades(trades: HotTradeNormalized[]): HotTradeNormalize
   return [...deduped.values()]
 }
 
-function describeScanSource(globalCount: number, marketCount: number, marketPools: number): string {
-  const parts: string[] = []
-  if (globalCount > 0) parts.push(`global trades (${globalCount})`)
-  if (marketCount > 0) parts.push(`market trades (${marketCount} from ${marketPools} pools)`)
-  if (parts.length === 0) return 'no trade sources'
-  if (parts.length === 2) return `mixed: ${parts.join(' + ')}`
-  return parts[0]
+function describeScanSourceLabels(sourceBreakdown: Record<string, number>): string {
+  const labels: string[] = []
+  if ((sourceBreakdown.global ?? 0) + (sourceBreakdown['global-deep'] ?? 0) > 0) labels.push('recent trades')
+  if ((sourceBreakdown.markets ?? 0) + (sourceBreakdown['markets-deep'] ?? 0) > 0) labels.push('market traders')
+  if ((sourceBreakdown.holders ?? 0) > 0) labels.push('top holder')
+  if ((sourceBreakdown.activity ?? 0) > 0) labels.push('activity scan')
+  if (labels.length === 0) return 'no trade sources'
+  if (labels.length > 1) return `mixed source (${labels.join(', ')})`
+  return labels[0]
+}
+
+function buildSourceLabels(sourceBreakdown: Record<string, number>): string[] {
+  const labels: string[] = []
+  if ((sourceBreakdown.global ?? 0) + (sourceBreakdown['global-deep'] ?? 0) > 0) labels.push('recent trades')
+  if ((sourceBreakdown.markets ?? 0) + (sourceBreakdown['markets-deep'] ?? 0) > 0) labels.push('market traders')
+  if ((sourceBreakdown.holders ?? 0) > 0) labels.push('top holder')
+  if ((sourceBreakdown.activity ?? 0) > 0) labels.push('activity scan')
+  return labels
 }
 
 function buildEmptyReasons(
@@ -746,7 +684,7 @@ function buildEmptyReasons(
   diagnostics: CopyDiscoveryDiagnostics,
 ): string[] {
   const reasons: string[] = []
-  if (summary.reliableCandidates > 0 || summary.watchCandidates > 0) return reasons
+  if (summary.reliableCandidates > 0 || summary.watchCandidates > 0 || summary.emergingCandidates > 0) return reasons
 
   const breakdown = summary.rejectionBreakdown
   const breakdownLabels: Record<string, string> = {
@@ -754,11 +692,14 @@ function buildEmptyReasons(
     negative_pnl: 'negative PnL',
     poor_win_rate: 'poor win rate',
     severe_losing_streak: 'severe losing streak',
+    severe_drawdown: 'severe drawdown',
     weak_sample: 'weak sample size',
-    low_reliability: 'low reliability score',
+    low_quality: 'low quality score',
+    lucky_win_risk: 'lucky win / outlier risk',
+    outlier_driven: 'outlier-driven profit',
+    open_exposure_risk: 'high open exposure',
+    poor_profit_factor: 'weak profit factor',
     no_promising_signal: 'no promising performance signal',
-    concentration_risk: 'concentration risk',
-    hard_fail: 'hard reliability failure',
     other: 'other gate failures',
   }
 
@@ -900,6 +841,8 @@ function makeHotEntry(agg: HotWalletAgg, winRate: number | null, pnl: number | n
     candidateTier: 'ignored',
     hotScore,
     reliabilityScore: 0,
+    qualityScore: 0,
+    recentQualityScore: 0,
     copySignal: 'IGNORE',
     confidence: 'Low',
     recentTradeCount: agg.trades.length,
@@ -916,11 +859,25 @@ function makeHotEntry(agg: HotWalletAgg, winRate: number | null, pnl: number | n
     timingEdge: agg.resolvedMoves > 0 ? (agg.positiveMoves / agg.resolvedMoves) * 100 : null,
     pnl,
     winRate,
+    profitFactor: null,
+    roi: null,
+    pnlExcludingLargestWin: null,
+    luckyWinRisk: false,
+    outlierDriven: false,
     reliabilityLabel: 'Active but unreliable',
     reliabilityReasons: [],
+    plainReasons: [],
     scoreReasons: [],
     isReliableCandidate: false,
     historicalTradeCount: 0,
+    candidateSource: 'recent trades',
+    activeBets: [],
+    backtest: {
+      estimatedReturnPct: null,
+      tradesSimulated: 0,
+      coverage: 'unavailable',
+      label: 'Backtest unavailable / incomplete',
+    },
   }
   entry.scoreReasons = buildHotReasons(entry)
   return entry
@@ -1123,6 +1080,44 @@ async function fetchDiscoveryMarketTrades(events: PolyEvent[], limitPerMarket = 
   }
 }
 
+async function fetchHolderWalletSeeds(events: PolyEvent[]): Promise<{
+  wallets: Array<{ address: string; pseudonym: string; name: string }>
+  count: number
+}> {
+  const conditionIds = uniqueStrings(
+    events.flatMap(event => (event.markets ?? []).map(market => market.conditionId).filter(Boolean) as string[]),
+  ).slice(0, 8)
+  const holders = await getMarketHolders(conditionIds, 15)
+  const seen = new Set<string>()
+  const wallets: Array<{ address: string; pseudonym: string; name: string }> = []
+  for (const holder of holders) {
+    if (seen.has(holder.proxyWallet)) continue
+    seen.add(holder.proxyWallet)
+    wallets.push({
+      address: holder.proxyWallet,
+      pseudonym: holder.pseudonym,
+      name: holder.name,
+    })
+  }
+  return { wallets, count: holders.length }
+}
+
+function mergeHolderSeeds(walletMap: Map<string, HotWalletAgg>, seeds: Array<{ address: string; pseudonym: string; name: string }>) {
+  for (const seed of seeds) {
+    if (walletMap.has(seed.address)) continue
+    walletMap.set(seed.address, {
+      address: seed.address,
+      pseudonym: seed.pseudonym,
+      name: seed.name,
+      trades: [],
+      volume: 0,
+      markets: new Map(),
+      positiveMoves: 0,
+      resolvedMoves: 0,
+    })
+  }
+}
+
 async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = MAX_ENRICH_WALLETS): Promise<HotTraderEntry[]> {
   const toEnrich = aggregates.slice(0, maxEnrich)
   const rest = aggregates.slice(maxEnrich).map(agg => makeHotEntry(agg, null, null))
@@ -1130,21 +1125,20 @@ async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = M
   const enriched = await Promise.allSettled(
     toEnrich.map(async agg => {
       try {
-        const [positions, activity] = await Promise.all([
+        const [positions, activity, closedPositions] = await Promise.all([
           getWalletPositions(agg.address, 100),
           getWalletActivity(agg.address, 200),
+          getClosedPositions(agg.address, 100),
         ])
         const tradesForAnalysis =
           activity.filter(t => t.type === 'TRADE' && (t.usdcSize ?? 0) >= 1).length >= 2
             ? activity.filter(t => t.type === 'TRADE' && (t.usdcSize ?? 0) >= 1)
             : agg.trades
 
-        const historicalMarkets = new Set(tradesForAnalysis.map(t => t.conditionId).filter(Boolean)).size
-        const marketsTraded = Math.max(agg.markets.size, historicalMarkets)
-
         const assets = [...new Set([
           ...tradesForAnalysis.map(t => t.asset),
           ...agg.trades.map(t => t.asset),
+          ...positions.map(p => p.asset),
         ].filter(Boolean))].slice(0, 24)
         const priceMap = await batchFetchPrices(assets)
 
@@ -1163,31 +1157,34 @@ async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = M
         const entry = makeHotEntry(
           agg,
           null,
-          positions.reduce((sum, pos) => sum + toFiniteNumber(pos.cashPnl, 0), 0),
+          closedPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.realizedPnl, 0), 0),
         )
 
-        const reliability = analyzeTraderReliability(tradesForAnalysis, positions, priceMap)
-        const merged = {
-          ...entry,
-          marketsTraded,
-          historicalTradeCount: reliability.sampleSize,
-          reliabilityScore: reliability.reliabilityScore,
-          copySignal: reliability.copySignal,
-          confidence: reliability.confidence,
-          realizedPnl: reliability.realizedPnl,
-          openValue: reliability.openValue,
-          totalPnl: reliability.totalPnl,
-          resolvedPositions: reliability.resolvedPositions,
-          currentLosingStreak: reliability.currentLosingStreak,
-          worstLosingStreak: reliability.worstLosingStreak,
-          winRate: reliability.winRate,
-          pnl: reliability.totalPnl,
-          reliabilityLabel: reliability.reliabilityLabel,
-          reliabilityReasons: reliability.reliabilityReasons,
-          isReliableCandidate: reliability.isReliableCandidate,
-          candidateTier: reliability.candidateTier,
-        }
-        return applyDiscoveryTier(merged, agg, reliability, marketsTraded)
+        const quality = computeRepeatableTraderQuality({
+          trades: tradesForAnalysis,
+          recentTrades: agg.trades,
+          positions,
+          closedPositions,
+          priceMap,
+        })
+
+        const candidateSource =
+          agg.trades.length > 0 && closedPositions.length > 0 ? 'mixed source' :
+          agg.trades.length > 0 ? 'recent trades' :
+          closedPositions.length > 0 ? 'activity scan' :
+          'top holder'
+
+        return applyQualityToEntry(
+          {
+            ...entry,
+            marketsTraded: quality.marketsTraded,
+            historicalTradeCount: quality.sampleTrades,
+            confidence: quality.closedPositions >= 20 ? 'High' : quality.closedPositions >= 10 ? 'Medium' : 'Low',
+          },
+          quality,
+          candidateSource,
+          positions,
+        )
       } catch {
         return makeHotEntry(agg, null, null)
       }
@@ -1360,17 +1357,17 @@ export async function fetchHotTraders(limit = 8): Promise<HotTraderLoadResult> {
 
 function sortHotTraderEntries(entries: HotTraderEntry[]): HotTraderEntry[] {
   return [...entries].sort((a, b) => {
-    const candidateOrder = { reliable: 0, watch: 1, ignored: 2 } as const
+    const candidateOrder = { reliable: 0, watch: 1, emerging: 2, ignored: 3 } as const
     const tierDelta = candidateOrder[a.candidateTier] - candidateOrder[b.candidateTier]
     if (tierDelta !== 0) return tierDelta
-    const reliabilityDelta = b.reliabilityScore - a.reliabilityScore
-    if (reliabilityDelta !== 0) return reliabilityDelta
+    const qualityDelta = b.qualityScore - a.qualityScore
+    if (qualityDelta !== 0) return qualityDelta
     return b.hotScore - a.hotScore
   })
 }
 
 export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryResult> {
-  const key = `copy-discovery:v4:${limit}`
+  const key = `copy-discovery:v5:${limit}`
   const cached = cacheGet<CopyDiscoveryResult>(key, TTL.discovery)
   if (cached !== null) return cached
 
@@ -1398,6 +1395,8 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
     diagnostics.sourceBreakdown[source] = (diagnostics.sourceBreakdown[source] ?? 0) + count
   }
 
+  const leaderboardNote = 'Leaderboard endpoint unavailable on data-api (404). Using trades, holders, positions, and activity.'
+
   const runDiscoveryPass = async (
     globalPages: number,
     globalStartPage: number,
@@ -1408,12 +1407,14 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
     const events = await fetchDiscoveryMarketEvents()
     diagnostics.marketPoolsScanned = Math.max(diagnostics.marketPoolsScanned, events.length)
     const marketSample = await fetchDiscoveryMarketTrades(events, marketLimitPerPool, maxMarketPools)
-    return { globalSample, marketSample, events }
+    const holderSeeds = await fetchHolderWalletSeeds(events)
+    countSource('holders', holderSeeds.count)
+    return { globalSample, marketSample, events, holderSeeds }
   }
 
   try {
     let globalPagesFetched = INITIAL_GLOBAL_PAGES
-    const { globalSample, marketSample } = await runDiscoveryPass(INITIAL_GLOBAL_PAGES, 0, 100, 28)
+    const { globalSample, marketSample, holderSeeds } = await runDiscoveryPass(INITIAL_GLOBAL_PAGES, 0, 100, 28)
 
     diagnostics.status = globalSample.status
     diagnostics.contentType = globalSample.contentType
@@ -1425,12 +1426,14 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
     let normalized = [...globalSample.normalized, ...marketSample.normalized]
     let dedupedTrades = dedupeNormalizedTrades(normalized)
     let walletMap = aggregateNormalizedTrades(dedupedTrades, () => {})
+    mergeHolderSeeds(walletMap, holderSeeds.wallets)
 
     const enrichAndClassify = async () => {
-      const candidateAggs = [...walletMap.values()]
+      const withTrades = [...walletMap.values()]
         .filter(agg => agg.trades.length >= 1 && agg.volume >= 1)
         .sort((a, b) => computeHotScore(b) - computeHotScore(a))
-        .slice(0, MAX_CANDIDATE_WALLETS)
+      const holderOnly = [...walletMap.values()].filter(agg => agg.trades.length === 0)
+      const candidateAggs = [...withTrades, ...holderOnly].slice(0, MAX_CANDIDATE_WALLETS)
 
       diagnostics.candidateWallets = candidateAggs.length
       const enriched = await enrichTraderReliability(candidateAggs, MAX_ENRICH_WALLETS)
@@ -1438,38 +1441,49 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
 
       const reliable = enriched.filter(entry => entry.candidateTier === 'reliable')
       const watchlist = enriched.filter(entry => entry.candidateTier === 'watch')
+      const emerging = enriched.filter(entry => entry.candidateTier === 'emerging')
       const ignored = enriched.filter(entry => entry.candidateTier === 'ignored')
 
-      return { reliable, watchlist, ignored, enriched }
+      return { reliable, watchlist, emerging, ignored, enriched }
     }
 
-    let { reliable, watchlist, ignored } = await enrichAndClassify()
+    let { reliable, watchlist, emerging, ignored } = await enrichAndClassify()
 
-    if (reliable.length === 0 && watchlist.length === 0) {
+    if (reliable.length === 0 && watchlist.length === 0 && emerging.length === 0) {
       const deepGlobal = await fetchGlobalTradePages(DEEP_SCAN_EXTRA_PAGES, globalPagesFetched)
       globalPagesFetched += DEEP_SCAN_EXTRA_PAGES
       countSource('global-deep', deepGlobal.normalized.length)
       normalized = [...normalized, ...deepGlobal.normalized]
       dedupedTrades = dedupeNormalizedTrades(normalized)
       walletMap = aggregateNormalizedTrades(dedupedTrades, () => {})
-      const deepMarket = await fetchDiscoveryMarketTrades(
-        await fetchDiscoveryMarketEvents(),
-        120,
-        36,
-      )
+      const deepEvents = await fetchDiscoveryMarketEvents()
+      const deepMarket = await fetchDiscoveryMarketTrades(deepEvents, 120, 36)
+      const deepHolders = await fetchHolderWalletSeeds(deepEvents)
       countSource('markets-deep', deepMarket.normalized.length)
+      countSource('holders', deepHolders.count)
       normalized = [...normalized, ...deepMarket.normalized]
       dedupedTrades = dedupeNormalizedTrades(normalized)
       walletMap = aggregateNormalizedTrades(dedupedTrades, () => {})
-      ;({ reliable, watchlist, ignored } = await enrichAndClassify())
+      mergeHolderSeeds(walletMap, deepHolders.wallets)
+      ;({ reliable, watchlist, emerging, ignored } = await enrichAndClassify())
     }
 
     diagnostics.rawTradeCount = normalized.length
     diagnostics.normalizedTradeCount = dedupedTrades.length
     diagnostics.walletGroupCount = walletMap.size
 
+    const sourceLabels = buildSourceLabels(diagnostics.sourceBreakdown)
+    const scanSource = describeScanSourceLabels(diagnostics.sourceBreakdown)
+    const apiNoteParts = [
+      globalPagesFetched >= INITIAL_GLOBAL_PAGES + DEEP_SCAN_EXTRA_PAGES
+        ? `Deep scan ran (${globalPagesFetched} global pages × ${GLOBAL_TRADE_PAGE_SIZE} trades/page).`
+        : globalPagesFetched > 1
+          ? `Scanned ${globalPagesFetched} global pages (${GLOBAL_TRADE_PAGE_SIZE}/page).`
+          : null,
+      leaderboardNote,
+    ].filter(Boolean)
+
     if (walletMap.size === 0) {
-      const apiNote = `Polymarket API returns up to ${GLOBAL_TRADE_PAGE_SIZE} trades per request; scanned ${globalPagesFetched} global page(s).`
       const summary: CopyDiscoverySummary = {
         scannedTrades: normalized.length,
         uniqueTrades: dedupedTrades.length,
@@ -1477,17 +1491,20 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
         enrichedWallets: 0,
         reliableCandidates: 0,
         watchCandidates: 0,
+        emergingCandidates: 0,
         ignoredActiveTraders: 0,
-        scanSource: describeScanSource(globalSample.normalized.length, marketSample.normalized.length, diagnostics.marketPoolsScanned),
-        apiNote,
+        scanSource,
+        apiNote: apiNoteParts.join(' '),
         emptyReasons: ['No wallets appeared in the trade sample.'],
         rejectionBreakdown: {},
+        sourceLabels,
       }
       const result: CopyDiscoveryResult = {
         state: 'empty',
         message: 'No strong copy candidates found in this scan.',
         reliable: [],
         watchlist: [],
+        emerging: [],
         ignored: [],
         nearMisses: [],
         summary,
@@ -1499,6 +1516,7 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
 
     const reliableSorted = sortHotTraderEntries(reliable).slice(0, limit)
     const watchSorted = sortHotTraderEntries(watchlist).slice(0, limit)
+    const emergingSorted = sortHotTraderEntries(emerging).slice(0, limit)
     const ignoredSortedAll = sortHotTraderEntries(ignored)
     const nearMisses = buildNearMisses(ignoredSortedAll, 5)
     const rejectionBreakdown = buildRejectionBreakdown(ignoredSortedAll)
@@ -1506,20 +1524,13 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
     diagnostics.reliableCandidates = reliableSorted.length
     diagnostics.watchCandidates = watchSorted.length
     diagnostics.ignoredActiveTraders = ignoredSortedAll.length
-    diagnostics.finalHotTraderCount = reliableSorted.length + watchSorted.length + ignoredSortedAll.length
+    diagnostics.finalHotTraderCount =
+      reliableSorted.length + watchSorted.length + emergingSorted.length + ignoredSortedAll.length
 
     const hasReliable = reliableSorted.length > 0
     const hasWatch = watchSorted.length > 0
-    const globalTradeCount = diagnostics.sourceBreakdown.global ?? 0
-    const marketTradeCount =
-      (diagnostics.sourceBreakdown.markets ?? 0) +
-      (diagnostics.sourceBreakdown['markets-deep'] ?? 0)
-    const apiNote =
-      globalPagesFetched >= INITIAL_GLOBAL_PAGES + DEEP_SCAN_EXTRA_PAGES
-        ? `Deep scan ran (${globalPagesFetched} global pages × ${GLOBAL_TRADE_PAGE_SIZE} trades/page). API caps each request at ${GLOBAL_TRADE_PAGE_SIZE} trades.`
-        : globalPagesFetched > 1
-          ? `Scanned ${globalPagesFetched} global pages (${GLOBAL_TRADE_PAGE_SIZE} trades/page max per request).`
-          : null
+    const hasEmerging = emergingSorted.length > 0
+    const hasAny = hasReliable || hasWatch || hasEmerging
 
     const summary: CopyDiscoverySummary = {
       scannedTrades: normalized.length,
@@ -1528,23 +1539,28 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
       enrichedWallets: diagnostics.enrichedWallets,
       reliableCandidates: diagnostics.reliableCandidates,
       watchCandidates: diagnostics.watchCandidates,
+      emergingCandidates: emergingSorted.length,
       ignoredActiveTraders: diagnostics.ignoredActiveTraders,
-      scanSource: describeScanSource(globalTradeCount, marketTradeCount, diagnostics.marketPoolsScanned),
-      apiNote,
+      scanSource,
+      apiNote: apiNoteParts.join(' '),
       emptyReasons: [],
       rejectionBreakdown,
+      sourceLabels,
     }
     summary.emptyReasons = buildEmptyReasons(summary, diagnostics)
 
     const result: CopyDiscoveryResult = {
-      state: hasReliable || hasWatch ? 'ok' : 'empty',
+      state: hasAny ? 'ok' : 'empty',
       message: hasReliable
         ? 'Copy-ready wallets found.'
         : hasWatch
-          ? 'Watchlist candidates found — promising but not copy-ready yet.'
-          : 'No strong copy candidates found in this scan.',
+          ? 'Strong watch candidates found — promising but not copy-ready yet.'
+          : hasEmerging
+            ? 'Emerging traders found — limited evidence, monitor only.'
+            : 'No strong copy candidates found in this scan.',
       reliable: reliableSorted,
       watchlist: watchSorted,
+      emerging: emergingSorted,
       ignored: [],
       nearMisses,
       summary,
@@ -1561,17 +1577,20 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
       enrichedWallets: diagnostics.enrichedWallets,
       reliableCandidates: diagnostics.reliableCandidates,
       watchCandidates: diagnostics.watchCandidates,
+      emergingCandidates: 0,
       ignoredActiveTraders: diagnostics.ignoredActiveTraders,
       scanSource: 'unknown',
-      apiNote: null,
+      apiNote: leaderboardNote,
       emptyReasons: ['Scan failed before completion.'],
       rejectionBreakdown: {},
+      sourceLabels: [],
     }
     const result: CopyDiscoveryResult = {
       state: 'error',
       message: error instanceof Error ? error.message : 'Could not load candidate discovery',
       reliable: [],
       watchlist: [],
+      emerging: [],
       ignored: [],
       nearMisses: [],
       summary,

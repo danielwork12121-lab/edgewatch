@@ -8,18 +8,21 @@ interface Props {
   onSelectWallet: (address: string) => void
 }
 
-const CACHE_KEY = 'copy-discovery:v4:8'
+const CACHE_KEY = 'copy-discovery:v5:8'
 
 const REJECTION_LABELS: Record<string, string> = {
   too_little_history: 'too little history',
   negative_pnl: 'negative PnL',
   poor_win_rate: 'poor win rate',
   severe_losing_streak: 'severe losing streak',
+  severe_drawdown: 'severe drawdown',
   weak_sample: 'weak sample',
-  low_reliability: 'low reliability',
+  low_quality: 'low quality score',
+  lucky_win_risk: 'lucky win / outlier risk',
+  outlier_driven: 'outlier-driven profit',
+  open_exposure_risk: 'high open exposure',
+  poor_profit_factor: 'weak profit factor',
   no_promising_signal: 'no promising signal',
-  concentration_risk: 'concentration risk',
-  hard_fail: 'hard failure',
   other: 'other',
 }
 
@@ -27,14 +30,26 @@ const devLog = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.debug('[EdgeWatch][copy-discovery]', ...args)
 }
 
+function tierLabel(tier: HotTraderEntry['candidateTier']): string {
+  switch (tier) {
+    case 'reliable': return 'Copy-ready'
+    case 'watch': return 'Strong watch'
+    case 'emerging': return 'Emerging — limited evidence'
+    default: return 'Rejected'
+  }
+}
+
+function tierBadge(tier: HotTraderEntry['candidateTier']): string {
+  switch (tier) {
+    case 'reliable': return 'badge-green'
+    case 'watch': return 'badge-yellow'
+    case 'emerging': return 'badge-orange'
+    default: return 'badge-red'
+  }
+}
+
 function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onSelectWallet: (address: string) => void }) {
-  const label =
-    trader.candidateTier === 'reliable' ? 'Copy-ready' :
-    trader.candidateTier === 'watch' ? 'Worth watching' :
-    'Rejected'
-  const badge =
-    trader.candidateTier === 'reliable' ? 'badge-green' :
-    trader.candidateTier === 'watch' ? 'badge-yellow' : 'badge-red'
+  const reasons = trader.plainReasons.length > 0 ? trader.plainReasons : trader.reliabilityReasons
 
   return (
     <div className="trader-card hot-trader-card">
@@ -42,49 +57,55 @@ function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onS
         <div className="trader-card-top">
           <div>
             <span className="trader-card-name">{trader.label || truncateAddress(trader.address)}</span>
-            <div className="estimate-label">{truncateAddress(trader.address)}</div>
+            <div className="estimate-label">{truncateAddress(trader.address)} · {trader.candidateSource}</div>
           </div>
           <div className="trader-card-badges">
-            <span className={`confidence-badge ${badge}`}>{label}</span>
-            <span className={`confidence-badge ${trader.copySignal === 'COPY' ? 'badge-green' : trader.copySignal === 'WATCH' ? 'badge-yellow' : 'badge-red'}`}>
-              {trader.copySignal}
+            <span className={`confidence-badge ${tierBadge(trader.candidateTier)}`}>{tierLabel(trader.candidateTier)}</span>
+            <span className={`confidence-badge ${trader.qualityScore >= 75 ? 'badge-green' : trader.qualityScore >= 60 ? 'badge-yellow' : 'badge-orange'}`}>
+              Quality {trader.qualityScore}/100
             </span>
-            <span className={`confidence-badge ${trader.reliabilityScore >= 75 ? 'badge-green' : trader.reliabilityScore >= 55 ? 'badge-yellow' : 'badge-orange'}`}>
-              Reliability {Math.round(trader.reliabilityScore)}/100
-            </span>
+            {trader.profitFactor !== null && (
+              <span className="confidence-badge badge-yellow">PF {trader.profitFactor.toFixed(2)}</span>
+            )}
           </div>
         </div>
 
         <div className="trader-card-meta">
           <span className="stat date">{trader.reliabilityLabel}</span>
-          <span className="stat date">{trader.recentTradeCount} recent trades</span>
+          <span className="stat date">{trader.recentTradeCount} recent · {trader.historicalTradeCount} historical</span>
           <span className="stat date">{trader.marketsTraded} markets</span>
-          <span className="stat date">Streak {trader.currentLosingStreak > 0 ? `Losing ${trader.currentLosingStreak}` : 'Even'}</span>
-          <span className="stat date">Worst loss streak {trader.worstLosingStreak}</span>
-          {trader.winRate !== null ? (
+          {trader.winRate !== null && (
             <span className="stat date">{(trader.winRate * 100).toFixed(0)}% win rate</span>
-          ) : (
-            <span className="stat date">Win rate unavailable</span>
           )}
-          {trader.realizedPnl !== null ? (
+          {trader.realizedPnl !== null && (
             <span className={`stat ${trader.realizedPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
               {trader.realizedPnl >= 0 ? '+' : ''}{formatUSD(trader.realizedPnl)} realized
             </span>
-          ) : (
-            <span className="stat date">Realized PnL unavailable</span>
           )}
+          {trader.pnlExcludingLargestWin !== null && trader.realizedPnl !== null && trader.realizedPnl > 0 && (
+            <span className="stat date">Ex-top-win {trader.pnlExcludingLargestWin >= 0 ? '+' : ''}{formatUSD(trader.pnlExcludingLargestWin)}</span>
+          )}
+          <span className="stat date">{trader.backtest.label}</span>
         </div>
+
+        {trader.activeBets.length > 0 && (
+          <div className="hot-trader-markets">
+            {trader.activeBets.slice(0, 2).map(bet => (
+              <span key={`${bet.title}-${bet.outcome}`} className="hot-trader-market">
+                {bet.title} · {bet.followability}
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="hot-trader-markets">
           {trader.activeMarkets.slice(0, 3).map(market => (
-            <span key={market} className="hot-trader-market">
-              {market}
-            </span>
+            <span key={market} className="hot-trader-market">{market}</span>
           ))}
         </div>
 
         <ul className="hot-trader-reasons">
-          {trader.reliabilityReasons.slice(0, 5).map((reason, index) => (
+          {reasons.slice(0, 5).map((reason, index) => (
             <li key={index}>{reason}</li>
           ))}
         </ul>
@@ -106,7 +127,7 @@ function NearMissRow({ entry, onSelectWallet }: { entry: NearMissEntry; onSelect
         <button type="button" className="near-miss-wallet" onClick={() => onSelectWallet(entry.address)}>
           {entry.label || truncateAddress(entry.address)}
         </button>
-        <span className="near-miss-stat">Reliability {entry.reliabilityScore}/100</span>
+        <span className="near-miss-stat">Quality {entry.reliabilityScore}/100</span>
         <span className="near-miss-stat">
           {entry.winRate !== null ? `${(entry.winRate * 100).toFixed(0)}% win rate` : 'Win rate n/a'}
         </span>
@@ -122,7 +143,10 @@ function NearMissRow({ entry, onSelectWallet }: { entry: NearMissEntry; onSelect
 
 function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
   const { summary } = result
-  const noCandidates = summary.reliableCandidates === 0 && summary.watchCandidates === 0
+  const noCandidates =
+    summary.reliableCandidates === 0 &&
+    summary.watchCandidates === 0 &&
+    summary.emergingCandidates === 0
   const breakdownEntries = Object.entries(summary.rejectionBreakdown).filter(([, count]) => count > 0)
 
   return (
@@ -146,7 +170,11 @@ function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
         </div>
         <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.watchCandidates}</span>
-          <span className="scan-summary-label">watchlist</span>
+          <span className="scan-summary-label">strong watch</span>
+        </div>
+        <div className="scan-summary-stat">
+          <span className="scan-summary-value">{summary.emergingCandidates}</span>
+          <span className="scan-summary-label">emerging</span>
         </div>
         <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.ignoredActiveTraders}</span>
@@ -155,6 +183,7 @@ function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
       </div>
       <p className="scan-summary-source">
         Source: {summary.scanSource}
+        {summary.sourceLabels.length > 0 ? ` (${summary.sourceLabels.join(', ')})` : ''}
         {summary.apiNote ? ` · ${summary.apiNote}` : ''}
       </p>
       {noCandidates && breakdownEntries.length > 0 && (
@@ -162,9 +191,7 @@ function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
           <strong>Rejection breakdown</strong>
           <ul>
             {breakdownEntries.map(([key, count]) => (
-              <li key={key}>
-                {count} failed: {REJECTION_LABELS[key] ?? key}
-              </li>
+              <li key={key}>{count} failed: {REJECTION_LABELS[key] ?? key}</li>
             ))}
           </ul>
         </div>
@@ -198,12 +225,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
       .then(next => {
         setResult(next)
         setLastUpdated(Date.now())
-        devLog('candidate discovery loaded', {
-          state: next.state,
-          message: next.message,
-          summary: next.summary,
-          nearMisses: next.nearMisses.length,
-        })
+        devLog('candidate discovery loaded', { state: next.state, summary: next.summary })
         if (next.state === 'error') setError('Could not scan candidate wallets')
       })
       .catch(err => {
@@ -219,7 +241,8 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
 
   const showReliable = (result?.reliable ?? []).length > 0
   const showWatch = (result?.watchlist ?? []).length > 0
-  const noStrongCandidates = !showReliable && !showWatch
+  const showEmerging = (result?.emerging ?? []).length > 0
+  const noStrongCandidates = !showReliable && !showWatch && !showEmerging
   const nearMisses = result?.nearMisses ?? []
 
   return (
@@ -228,7 +251,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
         <div>
           <h2 className="section-title">Copy Candidate Discovery</h2>
           <p className="section-subtitle">
-            Broad scan of recent trades, active markets, and wallet history. Only genuinely promising wallets surface as candidates.
+            Repeatable Trader Quality scoring — consistency over lucky wins. Only genuinely promising wallets surface.
           </p>
         </div>
         <div className="refresh-bar">
@@ -243,12 +266,6 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
       {error && <p className="error-msg">{error}</p>}
 
       {result && !loading && <ScanSummaryPanel result={result} />}
-
-      {!loading && !error && result && result.message && showReliable && (
-        <p className="score-disclaimer" style={{ marginBottom: 12 }}>
-          {result.message}
-        </p>
-      )}
 
       {!loading && showReliable && (
         <div className="candidate-section">
@@ -266,13 +283,8 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
       {!loading && showWatch && (
         <div className="candidate-section">
           <div className="section-heading" style={{ marginBottom: 12 }}>
-            <h3 className="markets-list-title">Watchlist Candidates ({result?.watchlist.length ?? 0})</h3>
+            <h3 className="markets-list-title">Strong Watch Candidates ({result?.watchlist.length ?? 0})</h3>
           </div>
-          {!showReliable && (
-            <p className="score-disclaimer" style={{ marginBottom: 12 }}>
-              No copy-ready wallets found in this scan. Showing watchlist candidates below.
-            </p>
-          )}
           <div className="trader-list">
             {result?.watchlist.map(trader => (
               <CandidateCard key={trader.address} trader={trader} onSelectWallet={onSelectWallet} />
@@ -281,25 +293,35 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
         </div>
       )}
 
+      {!loading && showEmerging && (
+        <div className="candidate-section">
+          <div className="section-heading" style={{ marginBottom: 12 }}>
+            <h3 className="markets-list-title">Emerging Traders ({result?.emerging.length ?? 0})</h3>
+          </div>
+          <p className="score-disclaimer" style={{ marginBottom: 12 }}>
+            Limited evidence — clean recent signals but not enough history for copy-ready status.
+          </p>
+          <div className="trader-list">
+            {result?.emerging.map(trader => (
+              <CandidateCard key={trader.address} trader={trader} onSelectWallet={onSelectWallet} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {!loading && noStrongCandidates && result && result.state !== 'error' && (
-        <p className="empty-msg">
-          No strong copy candidates found in this scan.
-        </p>
+        <p className="empty-msg">No strong copy candidates found in this scan.</p>
       )}
 
       {!loading && nearMisses.length > 0 && (
         <div className="ignored-traders-block">
-          <button
-            type="button"
-            className="ignored-toggle"
-            onClick={() => setShowNearMisses(v => !v)}
-          >
-            {showNearMisses ? 'Hide why no candidates?' : `Why no candidates? (${nearMisses.length} near misses)`}
+          <button type="button" className="ignored-toggle" onClick={() => setShowNearMisses(v => !v)}>
+            {showNearMisses ? 'Hide near misses' : `Why no candidates? (${nearMisses.length} near misses)`}
           </button>
           {showNearMisses && (
             <div className="near-miss-list" style={{ marginTop: 12 }}>
               <p className="score-disclaimer" style={{ marginBottom: 10 }}>
-                These wallets were closest to passing but were rejected — not recommended.
+                Closest wallets that still failed quality gates — not recommended.
               </p>
               {nearMisses.map(entry => (
                 <NearMissRow key={entry.address} entry={entry} onSelectWallet={onSelectWallet} />
