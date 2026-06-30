@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchHotTraders, type HotTraderEntry } from '../api/traders'
+import { fetchHotTraders, type HotTraderEntry, type HotTraderLoadResult } from '../api/traders'
 import { formatUSD } from '../api/polymarket'
 import { truncateAddress } from '../api/wallets'
 import { cacheTime, formatAge } from '../api/cache'
@@ -13,14 +13,20 @@ const devLog = (...args: unknown[]) => {
 }
 
 function HotTraderCard({ trader, rank, onSelectWallet }: { trader: HotTraderEntry; rank: number; onSelectWallet: (address: string) => void }) {
+  const confidence = trader.hotScore >= 65 ? 'High' : trader.hotScore >= 35 ? 'Medium' : 'Low'
   return (
     <div className="trader-card hot-trader-card">
       <div className="trader-card-rank">#{rank}</div>
       <div className="trader-card-body">
         <div className="trader-card-top">
-          <span className="trader-card-name">{trader.label || truncateAddress(trader.address)}</span>
+          <div>
+            <span className="trader-card-name">{trader.label || truncateAddress(trader.address)}</span>
+            <div className="estimate-label">{truncateAddress(trader.address)}</div>
+          </div>
           <div className="trader-card-badges">
-            <span className="confidence-badge badge-green">Hot {Math.round(trader.hotScore)}/100</span>
+            <span className={`confidence-badge ${confidence === 'High' ? 'badge-green' : confidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
+              {confidence} · Hot {Math.round(trader.hotScore)}/100
+            </span>
             {trader.winRate !== null && (
               <span className="confidence-badge badge-yellow">
                 {(trader.winRate * 100).toFixed(0)}% win rate
@@ -69,6 +75,7 @@ function HotTraderCard({ trader, rank, onSelectWallet }: { trader: HotTraderEntr
 
 export default function HotTradersFeed({ onSelectWallet }: Props) {
   const [traders, setTraders] = useState<HotTraderEntry[]>([])
+  const [feedResult, setFeedResult] = useState<HotTraderLoadResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
@@ -76,20 +83,31 @@ export default function HotTradersFeed({ onSelectWallet }: Props) {
   useEffect(() => {
     let cancelled = false
     const timer = window.setTimeout(() => {
+      setLoading(true)
       setError(null)
       fetchHotTraders(8)
-        .then(data => {
+        .then(result => {
           if (cancelled) return
-          setTraders(data)
+          setFeedResult(result)
+          setTraders(result.traders)
           setLastUpdated(Date.now())
           devLog('hot traders loaded', {
-            rawCount: data.length,
-            titles: data.slice(0, 5).map(trader => trader.label),
+            state: result.state,
+            message: result.message,
+            rawCount: result.diagnostics.rawTradeCount,
+            normalizedCount: result.diagnostics.normalizedTradeCount,
+            walletGroups: result.diagnostics.walletGroupCount,
+            finalCount: result.diagnostics.finalHotTraderCount,
+            discardedReasons: result.diagnostics.discardedReasons,
+            titles: result.traders.slice(0, 5).map(trader => trader.label),
           })
+          if (result.state === 'error') setError('Could not load hot traders')
+          else if (result.state === 'no-trades') setError('No recent public trades returned')
+          else if (result.state === 'filtered-out') setError('Trades found, but none passed filters')
         })
         .catch(err => {
           if (cancelled) return
-          setError(err instanceof Error ? err.message : 'Failed to load hot traders')
+          setError(err instanceof Error ? err.message : 'Could not load hot traders')
         })
         .finally(() => {
           if (!cancelled) setLoading(false)
@@ -112,14 +130,22 @@ export default function HotTradersFeed({ onSelectWallet }: Props) {
           </p>
         </div>
         <div className="refresh-bar">
-          {lastUpdated && <span className="last-updated">{formatAge(cacheTime('hot-traders:8') ?? lastUpdated)}</span>}
+          {lastUpdated && <span className="last-updated">{formatAge(cacheTime('hot-traders:v2:8') ?? lastUpdated)}</span>}
         </div>
       </div>
 
       {loading && <p className="empty-msg">Loading hot traders…</p>}
       {error && <p className="error-msg">{error}</p>}
       {!loading && !error && traders.length === 0 && (
-        <p className="empty-msg">No active hot traders found right now.</p>
+        <p className="empty-msg">
+          {feedResult?.message ?? 'No active hot traders found right now.'}
+        </p>
+      )}
+
+      {!loading && import.meta.env.DEV && feedResult && feedResult.state !== 'ok' && (
+        <div className="data-source-label" style={{ marginBottom: 12 }}>
+          <strong>Debug</strong> · raw {feedResult.diagnostics.rawTradeCount} · normalized {feedResult.diagnostics.normalizedTradeCount} · wallets {feedResult.diagnostics.walletGroupCount} · final {feedResult.diagnostics.finalHotTraderCount}
+        </div>
       )}
 
       {traders.length > 0 && (

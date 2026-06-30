@@ -1,6 +1,6 @@
 import type { PolyEvent, WalletTrade, TraderRankEntry } from '../types'
 import { getMarketTrades, getWalletPositions, truncateAddress } from './wallets'
-import { fetchTrending, formatUSD, toFiniteNumber } from './polymarket'
+import { formatUSD, toFiniteNumber } from './polymarket'
 import { batchFetchPrices } from './priceTracker'
 import { cacheGet, cacheSet, TTL } from './cache'
 
@@ -55,7 +55,129 @@ interface HotWalletAgg {
   resolvedMoves: number
 }
 
+interface HotTradeNormalized {
+  address: string
+  walletLabel: string
+  title: string
+  marketKey: string
+  marketName: string
+  volumeUSDC: number
+  price: number
+  timestamp: number
+  side: 'BUY' | 'SELL'
+  asset: string
+}
+
+interface HotTraderDiagnostics {
+  endpoint: string
+  status: number | null
+  rawType: string
+  contentType: string | null
+  rawTradeCount: number
+  rawSamples: unknown[]
+  normalizedTradeCount: number
+  walletGroupCount: number
+  finalHotTraderCount: number
+  discardedReasons: Record<string, number>
+}
+
+export interface HotTraderLoadResult {
+  state: 'ok' | 'error' | 'no-trades' | 'filtered-out'
+  message: string
+  traders: HotTraderEntry[]
+  diagnostics: HotTraderDiagnostics
+}
+
 // ─── Internal helper ───────────────────────────────────────────────────────
+
+const HOT_TRADES_ENDPOINT = 'https://data-api.polymarket.com/trades?limit=200'
+
+const devLog = (...args: unknown[]) => {
+  if (import.meta.env.DEV) console.debug('[EdgeWatch][hot-traders]', ...args)
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return ''
+}
+
+function toTimestampSeconds(value: unknown): number {
+  const numeric = toFiniteNumber(value, Number.NaN)
+  if (Number.isFinite(numeric)) return numeric > 1e12 ? Math.floor(numeric / 1000) : Math.floor(numeric)
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) return Math.floor(parsed / 1000)
+  }
+  return 0
+}
+
+function normalizeRawTrade(raw: unknown): HotTradeNormalized | null {
+  if (!raw || typeof raw !== 'object') return null
+  const record = raw as Record<string, unknown>
+  const address = firstString(
+    record.proxyWallet,
+    record.wallet,
+    record.user,
+    record.maker,
+    record.taker,
+    record.owner,
+  ).toLowerCase()
+  const volumeUSDC = toFiniteNumber(
+    record.usdcSize ?? record.sizeUsd ?? record.size ?? record.amount ?? record.volume,
+    Number.NaN,
+  )
+  const price = toFiniteNumber(record.price ?? record.outcomePrice ?? record.entryPrice, Number.NaN)
+  const timestamp = toTimestampSeconds(record.timestamp ?? record.createdAt ?? record.tradeTime ?? record.time)
+  const title = firstString(
+    record.title,
+    record.marketQuestion,
+    record.question,
+    record.market,
+    record.marketSlug,
+    record.slug,
+    record.eventSlug,
+  ) || 'Unknown market'
+  const marketKey = firstString(record.conditionId, record.marketId, record.tokenId, record.asset, record.slug, title)
+  const marketName = firstString(record.marketQuestion, record.title, record.market, record.slug, title) || title
+  const side = String(record.side ?? '').toUpperCase() === 'SELL' ? 'SELL' : 'BUY'
+  const walletLabel = firstString(record.pseudonym, record.name, record.label)
+  const asset = firstString(record.asset, record.tokenId, record.marketId, marketKey)
+
+  if (!address || !marketKey || !Number.isFinite(volumeUSDC) || volumeUSDC <= 0) return null
+
+  return {
+    address,
+    walletLabel,
+    title,
+    marketKey,
+    marketName,
+    volumeUSDC,
+    price: Number.isFinite(price) ? price : 0,
+    timestamp: timestamp > 0 ? timestamp : Math.floor(Date.now() / 1000),
+    side: side === 'SELL' ? 'SELL' : 'BUY',
+    asset,
+  }
+}
+
+function computeHotScore(agg: HotWalletAgg): number {
+  const recentVolume = agg.volume
+  const recentTrades = agg.trades.length
+  const marketsTraded = agg.markets.size
+  const latestTrade = agg.trades.reduce((max, trade) => Math.max(max, trade.timestamp), 0)
+  const ageHours = latestTrade > 0 ? Math.max(0, (Date.now() / 1000 - latestTrade) / 3600) : 999
+  const recencyComponent = Math.max(0, 20 - Math.min(20, ageHours * 2))
+  const volumeComponent = Math.min(38, Math.log10(recentVolume + 1) * 12)
+  const activityComponent = Math.min(24, recentTrades * 8)
+  const breadthComponent = Math.min(18, marketsTraded * 6)
+  const averageSize = recentVolume / Math.max(recentTrades, 1)
+  const avgComponent = Math.min(8, Math.log10(averageSize + 1) * 4)
+  const singleTradePenalty = recentTrades === 1 ? 8 : 0
+  const score = volumeComponent + activityComponent + breadthComponent + recencyComponent + avgComponent - singleTradePenalty
+  return Math.max(0, Math.min(100, score))
+}
 
 async function fetchAndRank(tokenIds: string[], minTrades = 1): Promise<{
   traders: TraderRankEntry[]
@@ -147,42 +269,21 @@ function collectMarketLabels(trades: WalletTrade[]): string[] {
     .map(item => item.label)
 }
 
-function computeHotScore(agg: HotWalletAgg, winRate: number | null, pnl: number | null): number {
-  const recentVolume = agg.volume
-  const recentTrades = agg.trades.length
-  const marketsTraded = agg.markets.size
-  const timingScore = agg.resolvedMoves > 0 ? agg.positiveMoves / agg.resolvedMoves : 0
-  const volumeComponent = Math.min(35, Math.log10(recentVolume + 1) * 10)
-  const activityComponent = Math.min(25, recentTrades * 4)
-  const breadthComponent = Math.min(15, marketsTraded * 5)
-  const timingComponent = Math.min(15, timingScore * 15)
-  const pnlComponent = pnl === null ? 0 : Math.max(-8, Math.min(10, Math.log10(Math.abs(pnl) + 1) * (pnl >= 0 ? 2 : -2)))
-  const winComponent = winRate === null ? 0 : Math.max(-5, Math.min(8, (winRate - 0.5) * 40))
-  const oneOffPenalty = recentTrades <= 1 ? 25 : recentTrades <= 2 ? 10 : 0
-  const score = volumeComponent + activityComponent + breadthComponent + timingComponent + pnlComponent + winComponent - oneOffPenalty
-  return Math.max(0, Math.min(100, score))
-}
-
-function buildHotReasons(entry: HotTraderEntry, timingEdgeAvailable: boolean): string[] {
+function buildHotReasons(entry: HotTraderEntry): string[] {
   const reasons: string[] = []
-  reasons.push(`✓ ${entry.recentTradeCount} recent trades`)
-  reasons.push(`✓ ${entry.marketsTraded} active market${entry.marketsTraded === 1 ? '' : 's'}`)
+  reasons.push(`✓ ${entry.recentTradeCount} recent trade${entry.recentTradeCount === 1 ? '' : 's'}`)
+  reasons.push(`✓ ${entry.marketsTraded} unique market${entry.marketsTraded === 1 ? '' : 's'}`)
   reasons.push(`✓ ${formatUSD(entry.recentVolumeUSDC)} recent volume`)
+  reasons.push(`✓ Average trade ${formatUSD(entry.avgTradeSize)}`)
   if (entry.winRate !== null) reasons.push(`✓ ${(entry.winRate * 100).toFixed(0)}% win rate on resolved positions`)
   else reasons.push('• Win rate unavailable')
   if (entry.pnl !== null) reasons.push(`✓ ${entry.pnl >= 0 ? '+' : ''}${formatUSD(entry.pnl)} PnL`)
   else reasons.push('• PnL unavailable')
-  if (timingEdgeAvailable && entry.timingEdge !== null) {
-    reasons.push(`✓ ${entry.timingEdge.toFixed(0)}% favorable price moves after entry`)
-  } else {
-    reasons.push('• Timing edge estimated from live prices')
-  }
   return reasons.slice(0, 4)
 }
 
 function makeHotEntry(agg: HotWalletAgg, winRate: number | null, pnl: number | null): HotTraderEntry {
-  const timingEdge = agg.resolvedMoves > 0 ? (agg.positiveMoves / agg.resolvedMoves) * 100 : null
-  const hotScore = computeHotScore(agg, winRate, pnl)
+  const hotScore = computeHotScore(agg)
   const entry: HotTraderEntry = {
     address: agg.address,
     label: agg.pseudonym || agg.name || truncateAddress(agg.address),
@@ -194,142 +295,237 @@ function makeHotEntry(agg: HotWalletAgg, winRate: number | null, pnl: number | n
     avgTradeSize: agg.volume / Math.max(agg.trades.length, 1),
     marketsTraded: agg.markets.size,
     activeMarkets: collectMarketLabels(agg.trades),
-    timingEdge,
+    timingEdge: agg.resolvedMoves > 0 ? (agg.positiveMoves / agg.resolvedMoves) * 100 : null,
     pnl,
     winRate,
     scoreReasons: [],
   }
-  entry.scoreReasons = buildHotReasons(entry, timingEdge !== null)
+  entry.scoreReasons = buildHotReasons(entry)
   return entry
 }
 
-export async function fetchHotTraders(limit = 8): Promise<HotTraderEntry[]> {
-  const key = `hot-traders:${limit}`
-  const cached = cacheGet<HotTraderEntry[]>(key, TTL.hotTraders)
+export async function fetchHotTraders(limit = 8): Promise<HotTraderLoadResult> {
+  const key = `hot-traders:v2:${limit}`
+  const cached = cacheGet<HotTraderLoadResult>(key, TTL.hotTraders)
   if (cached !== null) return cached
 
-  const trending = await fetchTrending(8)
-  const tokenLiquidity = new Map<string, number>()
-  const tokenIds: string[] = []
+  const diagnostics: HotTraderDiagnostics = {
+    endpoint: HOT_TRADES_ENDPOINT,
+    status: null,
+    rawType: 'unknown',
+    contentType: null,
+    rawTradeCount: 0,
+    rawSamples: [],
+    normalizedTradeCount: 0,
+    walletGroupCount: 0,
+    finalHotTraderCount: 0,
+    discardedReasons: {},
+  }
 
-  for (const event of trending) {
-    for (const market of event.markets ?? []) {
-      const liquidity = toFiniteNumber(market.liquidity, 0)
-      const ids = (() => {
-        try {
-          return market.clobTokenIds ? JSON.parse(market.clobTokenIds) : []
-        } catch {
-          return []
-        }
-      })()
-      for (const id of ids.slice(0, 2)) {
-        if (!id) continue
-        tokenLiquidity.set(id, liquidity)
-        tokenIds.push(id)
-      }
+  const countDiscard = (reason: string) => {
+    diagnostics.discardedReasons[reason] = (diagnostics.discardedReasons[reason] ?? 0) + 1
+  }
+
+  try {
+    const res = await fetch(HOT_TRADES_ENDPOINT)
+    diagnostics.status = res.status
+    diagnostics.contentType = res.headers.get('content-type')
+    const text = await res.text()
+    let parsed: unknown = null
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      parsed = text
     }
-  }
+    diagnostics.rawType = Array.isArray(parsed) ? 'array' : typeof parsed
+    const rawTrades = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object'
+        ? Object.values(parsed as Record<string, unknown>)
+        : []
+    diagnostics.rawTradeCount = rawTrades.length
+    diagnostics.rawSamples = rawTrades.slice(0, 3)
 
-  const uniqueTokenIds = [...new Set(tokenIds)].slice(0, 16)
-  if (uniqueTokenIds.length === 0) {
-    cacheSet(key, [])
-    return []
-  }
+    devLog('raw feed', {
+      endpoint: diagnostics.endpoint,
+      status: diagnostics.status,
+      rawType: diagnostics.rawType,
+      contentType: diagnostics.contentType,
+      rawTradeCount: diagnostics.rawTradeCount,
+      rawSamples: diagnostics.rawSamples,
+    })
 
-  const tradeSets = await Promise.allSettled(
-    uniqueTokenIds.map(id => getMarketTrades(id, 120))
-  )
+    if (!res.ok) {
+      const result: HotTraderLoadResult = {
+        state: 'error',
+        message: 'Could not load hot traders',
+        traders: [],
+        diagnostics,
+      }
+      return result
+    }
 
-  const recentWindow = Date.now() / 1000 - 72 * 60 * 60
-  const allTrades = tradeSets
-    .filter((r): r is PromiseFulfilledResult<WalletTrade[]> => r.status === 'fulfilled')
-    .flatMap(r => r.value.filter(t => {
-      const liquidity = tokenLiquidity.get(t.asset) ?? 0
-      return t.type === 'TRADE' &&
-        (t.usdcSize ?? 0) >= 10 &&
-        liquidity >= 10_000 &&
-        t.timestamp >= recentWindow
-    }))
+    if (rawTrades.length === 0) {
+      const result: HotTraderLoadResult = {
+        state: 'no-trades',
+        message: 'No recent public trades returned',
+        traders: [],
+        diagnostics,
+      }
+      cacheSet(key, result)
+      return result
+    }
 
-  if (allTrades.length === 0) {
-    cacheSet(key, [])
-    return []
-  }
+    const normalized = rawTrades
+      .map(normalizeRawTrade)
+      .filter((trade): trade is HotTradeNormalized => trade !== null)
+    diagnostics.normalizedTradeCount = normalized.length
 
-  const walletMap = new Map<string, HotWalletAgg>()
-  for (const trade of allTrades) {
-    const addr = trade.proxyWallet
-    if (!addr) continue
-    if (!walletMap.has(addr)) {
-      walletMap.set(addr, {
-        address: addr,
-        pseudonym: trade.pseudonym ?? '',
-        name: trade.name ?? '',
-        trades: [],
-        volume: 0,
-        markets: new Map(),
-        positiveMoves: 0,
-        resolvedMoves: 0,
+    const filtered = normalized.filter(trade => {
+      if (!trade.address) {
+        countDiscard('missing_wallet')
+        return false
+      }
+      if (trade.volumeUSDC < 1) {
+        countDiscard('below_volume_floor')
+        return false
+      }
+      return true
+    })
+
+    const walletMap = new Map<string, HotWalletAgg>()
+    for (const trade of filtered) {
+      if (!walletMap.has(trade.address)) {
+        walletMap.set(trade.address, {
+          address: trade.address,
+          pseudonym: trade.walletLabel,
+          name: trade.walletLabel,
+          trades: [],
+          volume: 0,
+          markets: new Map(),
+          positiveMoves: 0,
+          resolvedMoves: 0,
+        })
+      }
+      const agg = walletMap.get(trade.address)!
+      const walletTrade: WalletTrade = {
+        proxyWallet: trade.address,
+        timestamp: trade.timestamp,
+        conditionId: trade.marketKey,
+        type: 'TRADE',
+        size: trade.volumeUSDC,
+        usdcSize: trade.volumeUSDC,
+        price: trade.price,
+        asset: trade.asset || trade.marketKey,
+        side: trade.side,
+        outcomeIndex: 0,
+        title: trade.title,
+        slug: trade.marketName,
+        icon: '',
+        eventSlug: trade.marketName,
+        outcome: trade.side,
+        name: trade.walletLabel,
+        pseudonym: trade.walletLabel,
+      }
+      agg.trades.push(walletTrade)
+      agg.volume += trade.volumeUSDC
+      agg.markets.set(trade.marketKey, {
+        label: trade.marketName,
+        count: (agg.markets.get(trade.marketKey)?.count ?? 0) + 1,
+        lastTs: trade.timestamp,
       })
     }
-    const agg = walletMap.get(addr)!
-    agg.trades.push(trade)
-    agg.volume += trade.usdcSize ?? 0
-    agg.markets.set(trade.conditionId, {
-      label: trade.title || trade.eventSlug || trade.slug || 'Unknown market',
-      count: (agg.markets.get(trade.conditionId)?.count ?? 0) + 1,
-      lastTs: trade.timestamp,
-    })
-  }
 
-  const prequalified = [...walletMap.values()]
-    .filter(agg => agg.trades.length >= 2 && agg.volume >= 50 && agg.markets.size >= 2)
-    .sort((a, b) => {
-      const aScore = computeHotScore(a, null, null)
-      const bScore = computeHotScore(b, null, null)
-      return bScore - aScore
-    })
-    .slice(0, Math.max(limit * 2, 12))
+    diagnostics.walletGroupCount = walletMap.size
 
-  const assets = [...new Set(prequalified.flatMap(agg => agg.trades.map(t => t.asset)).filter(Boolean))].slice(0, 24)
-  const priceMap = await batchFetchPrices(assets)
-
-  for (const agg of prequalified) {
-    for (const trade of agg.trades) {
-      const cur = priceMap.get(trade.asset)
-      if (cur === undefined || !trade.price || trade.price <= 0) continue
-      const delta = trade.side === 'BUY' ? cur - trade.price : trade.price - cur
-      agg.resolvedMoves += 1
-      if (delta > 0) agg.positiveMoves += 1
-    }
-  }
-
-  const ranked = prequalified
-    .map((agg): HotTraderEntry => makeHotEntry(agg, null, null))
-    .sort((a, b) => b.hotScore - a.hotScore)
-    .slice(0, limit)
-
-  const enriched = await Promise.allSettled(
-    ranked.map(async entry => {
-      try {
-        const positions = await getWalletPositions(entry.address, 100)
-        const withVal = positions.filter(p => (p.initialValue ?? 0) > 0)
-        const pnl = withVal.reduce((s, p) => s + (p.cashPnl ?? 0), 0)
-        const winRate = withVal.length > 0
-          ? withVal.filter(p => (p.cashPnl ?? 0) >= 0).length / withVal.length
-          : null
-        const agg = walletMap.get(entry.address)
-        if (!agg) return entry
-        return makeHotEntry(agg, winRate, pnl)
-      } catch {
-        return entry
+    if (walletMap.size === 0) {
+      const result: HotTraderLoadResult = {
+        state: 'filtered-out',
+        message: 'Trades found, but none passed filters',
+        traders: [],
+        diagnostics,
       }
-    })
-  )
+      cacheSet(key, result)
+      devLog('filtered out all trades', diagnostics)
+      return result
+    }
 
-  const final = enriched.map((result, i) => result.status === 'fulfilled' ? result.value : ranked[i])
-  cacheSet(key, final)
-  return final
+    const prequalified = [...walletMap.values()]
+      .filter(agg => agg.trades.length >= 1 && agg.volume >= 1 && agg.markets.size >= 1)
+      .sort((a, b) => {
+        const aScore = computeHotScore(a)
+        const bScore = computeHotScore(b)
+        return bScore - aScore
+      })
+      .slice(0, Math.max(limit * 2, 12))
+
+    const assets = [...new Set(prequalified.flatMap(agg => agg.trades.map(t => t.asset)).filter(Boolean))].slice(0, 24)
+    const priceMap = await batchFetchPrices(assets)
+
+    for (const agg of prequalified) {
+      for (const trade of agg.trades) {
+        const cur = priceMap.get(trade.asset)
+        if (cur === undefined || !trade.price || trade.price <= 0) continue
+        const delta = trade.side === 'BUY' ? cur - trade.price : trade.price - cur
+        agg.resolvedMoves += 1
+        if (delta > 0) agg.positiveMoves += 1
+      }
+    }
+
+    const ranked = prequalified
+      .map((agg): HotTraderEntry => {
+        const entry = makeHotEntry(agg, null, null)
+        entry.winRate = null
+        entry.pnl = null
+        return entry
+      })
+      .sort((a, b) => b.hotScore - a.hotScore)
+      .slice(0, limit)
+
+    let final = ranked
+    try {
+      const enriched = await Promise.allSettled(
+        ranked.map(async entry => {
+          try {
+            const positions = await getWalletPositions(entry.address, 50)
+            const withVal = positions.filter(p => (p.initialValue ?? 0) > 0)
+            const pnl = withVal.reduce((s, p) => s + (p.cashPnl ?? 0), 0)
+            const winRate = withVal.length > 0
+              ? withVal.filter(p => (p.cashPnl ?? 0) >= 0).length / withVal.length
+              : null
+            const agg = walletMap.get(entry.address)
+            if (!agg) return entry
+            return makeHotEntry(agg, winRate, pnl)
+          } catch {
+            return entry
+          }
+        })
+      )
+      final = enriched.map((result, i) => result.status === 'fulfilled' ? result.value : ranked[i])
+    } catch {
+      final = ranked
+    }
+
+    diagnostics.finalHotTraderCount = final.length
+    const result: HotTraderLoadResult = {
+      state: final.length > 0 ? 'ok' : 'filtered-out',
+      message: final.length > 0 ? 'Hot traders loaded' : 'Trades found, but none passed filters',
+      traders: final,
+      diagnostics,
+    }
+    cacheSet(key, result)
+    devLog('final hot traders', diagnostics)
+    return result
+    } catch (error) {
+    const result: HotTraderLoadResult = {
+      state: 'error',
+      message: error instanceof Error ? error.message : 'Could not load hot traders',
+      traders: [],
+      diagnostics,
+    }
+    devLog('hot traders error', { error, diagnostics })
+    return result
+  }
 }
 
 // ─── Public exports ────────────────────────────────────────────────────────
