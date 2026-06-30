@@ -61,8 +61,11 @@ function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onS
           </div>
           <div className="trader-card-badges">
             <span className={`confidence-badge ${tierBadge(trader.candidateTier)}`}>{tierLabel(trader.candidateTier)}</span>
-            <span className={`confidence-badge ${trader.qualityScore >= 75 ? 'badge-green' : trader.qualityScore >= 60 ? 'badge-yellow' : 'badge-orange'}`}>
-              Quality {trader.qualityScore}/100
+            <span className={`confidence-badge ${trader.reliabilityScore >= 75 ? 'badge-green' : trader.reliabilityScore >= 60 ? 'badge-yellow' : 'badge-orange'}`}>
+              Reliability {trader.reliabilityScore}/100
+            </span>
+            <span className={`confidence-badge ${trader.confidence === 'High' ? 'badge-green' : trader.confidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
+              Data confidence {trader.confidence}
             </span>
             {trader.profitFactor !== null && (
               <span className="confidence-badge badge-yellow">PF {trader.profitFactor.toFixed(2)}</span>
@@ -127,7 +130,7 @@ function NearMissRow({ entry, onSelectWallet }: { entry: NearMissEntry; onSelect
         <button type="button" className="near-miss-wallet" onClick={() => onSelectWallet(entry.address)}>
           {entry.label || truncateAddress(entry.address)}
         </button>
-        <span className="near-miss-stat">Quality {entry.reliabilityScore}/100</span>
+        <span className="near-miss-stat">Reliability {entry.reliabilityScore}/100</span>
         <span className="near-miss-stat">
           {entry.winRate !== null ? `${(entry.winRate * 100).toFixed(0)}% win rate` : 'Win rate n/a'}
         </span>

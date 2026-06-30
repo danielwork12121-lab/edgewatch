@@ -14,10 +14,7 @@ const devLog = (...args: unknown[]) => {
 
 function HotTraderCard({ trader, rank, onSelectWallet }: { trader: HotTraderEntry; rank: number; onSelectWallet: (address: string) => void }) {
   const confidence = trader.hotScore >= 65 ? 'High' : trader.hotScore >= 35 ? 'Medium' : 'Low'
-  const historyLabel =
-    trader.copySignal === 'COPY' ? 'Reliable candidate' :
-    trader.copySignal === 'WATCH' ? 'Watch candidate' :
-    trader.reliabilityLabel
+  const historyLabel = trader.reliabilityLabel
   return (
     <div className="trader-card hot-trader-card">
       <div className="trader-card-rank">#{rank}</div>

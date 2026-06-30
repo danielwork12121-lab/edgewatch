@@ -181,7 +181,7 @@ export function assessPositionFollowability(
 
 export function summarizeActiveBets(
   positions: WalletPosition[],
-  quality: RepeatableTraderQuality,
+  quality: Pick<RepeatableTraderQuality, 'tier' | 'luckyWinRisk' | 'qualityScore'>,
   limit = 3,
 ): ActiveBetSummary[] {
   return positions
@@ -581,6 +581,176 @@ function classifyTier(input: {
     return reject(`Negative realized PnL (${formatUSD(input.realizedPnl)})`, 'negative_pnl')
   }
   return reject('No strong repeatable performance signal', 'no_promising_signal')
+}
+
+export type CopySignal = 'COPY' | 'WATCH' | 'IGNORE'
+export type DataConfidenceLevel = 'Low' | 'Medium' | 'High'
+
+export interface TraderQualityMetrics {
+  realizedPnl: number
+  roi: number | null
+  profitFactor: number | null
+  winRate: number | null
+  medianOutcome: number | null
+  drawdownPct: number | null
+  currentLosingStreak: number
+  worstLosingStreak: number
+  closedPositions: number
+  sampleTrades: number
+  marketsTraded: number
+  openValue: number
+  timingEdgePct: number | null
+}
+
+export interface TraderQualityEvaluation {
+  reliabilityScore: number
+  qualityScore: number
+  recentQualityScore: number
+  copySignal: CopySignal
+  confidenceLevel: DataConfidenceLevel
+  dataConfidenceLabel: string
+  tier: CandidateTier
+  tierLabel: string
+  rejectionReasons: string[]
+  positiveReasons: string[]
+  riskLabels: string[]
+  metrics: TraderQualityMetrics
+  rejectionReason: string
+  rejectionCategory: string
+  luckyWinRisk: boolean
+  outlierDriven: boolean
+  pnlExcludingLargestWin: number
+  backtest: FollowBacktest
+  plainReasons: string[]
+  winRate: number | null
+  profitFactor: number | null
+  roi: number | null
+  closedPositions: number
+  sampleTrades: number
+  currentLosingStreak: number
+  worstLosingStreak: number
+}
+
+function deriveCopySignal(tier: CandidateTier): CopySignal {
+  if (tier === 'reliable') return 'COPY'
+  if (tier === 'watch' || tier === 'emerging') return 'WATCH'
+  return 'IGNORE'
+}
+
+export function tierDisplayLabel(tier: CandidateTier, rejectionReason = ''): string {
+  switch (tier) {
+    case 'reliable':
+      return 'Reliable candidate'
+    case 'watch':
+      return 'Strong watch candidate'
+    case 'emerging':
+      return 'Emerging trader — limited evidence'
+    case 'ignored':
+      return rejectionReason || 'Rejected'
+    default: {
+      const _exhaustive: never = tier
+      return _exhaustive
+    }
+  }
+}
+
+function deriveDataConfidence(
+  closedPositions: number,
+  sampleTrades: number,
+): { level: DataConfidenceLevel; label: string } {
+  const sample = Math.max(closedPositions, sampleTrades)
+  if (sample >= 40) {
+    return { level: 'High', label: `Data confidence High · ${sample}+ records analyzed` }
+  }
+  if (sample >= 15) {
+    return { level: 'Medium', label: `Data confidence Medium · ${sample} records analyzed` }
+  }
+  return { level: 'Low', label: `Data confidence Low · ${sample} records analyzed` }
+}
+
+function splitQualityReasons(
+  plainReasons: string[],
+  luckyWinRisk: boolean,
+  outlierDriven: boolean,
+): { positiveReasons: string[]; riskLabels: string[] } {
+  const riskLabels: string[] = []
+  if (luckyWinRisk) riskLabels.push('Lucky win risk')
+  if (outlierDriven) riskLabels.push('Outlier-driven profit')
+
+  const positiveReasons = plainReasons.filter(reason => {
+    const lower = reason.toLowerCase()
+    return !lower.includes('outlier') && !lower.includes('lucky') && !lower.includes('depends on')
+  })
+
+  return { positiveReasons, riskLabels }
+}
+
+export function evaluateTraderQuality(input: {
+  trades: WalletTrade[]
+  recentTrades?: WalletTrade[]
+  positions: WalletPosition[]
+  closedPositions: ClosedPosition[]
+  priceMap: Map<string, number>
+}): TraderQualityEvaluation {
+  const base = computeRepeatableTraderQuality({
+    ...input,
+    recentTrades: input.recentTrades ?? input.trades,
+  })
+  const copySignal = deriveCopySignal(base.tier)
+  const { level, label } = deriveDataConfidence(base.closedPositions, base.sampleTrades)
+  const { positiveReasons, riskLabels } = splitQualityReasons(
+    base.plainReasons,
+    base.luckyWinRisk,
+    base.outlierDriven,
+  )
+
+  const rejectionReasons =
+    base.tier === 'ignored'
+      ? [base.rejectionReason, ...base.plainReasons].filter(Boolean)
+      : []
+
+  return {
+    reliabilityScore: base.qualityScore,
+    qualityScore: base.qualityScore,
+    recentQualityScore: base.recentQualityScore,
+    copySignal,
+    confidenceLevel: level,
+    dataConfidenceLabel: label,
+    tier: base.tier,
+    tierLabel: tierDisplayLabel(base.tier, base.rejectionReason),
+    rejectionReasons,
+    positiveReasons,
+    riskLabels,
+    metrics: {
+      realizedPnl: base.realizedPnl,
+      roi: base.roi,
+      profitFactor: base.profitFactor,
+      winRate: base.winRate,
+      medianOutcome: base.medianOutcome,
+      drawdownPct: base.drawdownPct,
+      currentLosingStreak: base.currentLosingStreak,
+      worstLosingStreak: base.worstLosingStreak,
+      closedPositions: base.closedPositions,
+      sampleTrades: base.sampleTrades,
+      marketsTraded: base.marketsTraded,
+      openValue: base.openValue,
+      timingEdgePct: base.timingEdgePct,
+    },
+    rejectionReason: base.rejectionReason,
+    rejectionCategory: base.rejectionCategory,
+    luckyWinRisk: base.luckyWinRisk,
+    outlierDriven: base.outlierDriven,
+    pnlExcludingLargestWin: base.pnlExcludingLargestWin,
+    backtest: base.backtest,
+    plainReasons: base.plainReasons,
+    winRate: base.winRate,
+    profitFactor: base.profitFactor,
+    roi: base.roi,
+    closedPositions: base.closedPositions,
+    sampleTrades: base.sampleTrades,
+    currentLosingStreak: base.currentLosingStreak,
+    worstLosingStreak: base.worstLosingStreak,
+  }
 }
 
 export function categorizeQualityRejection(reason: string): string {

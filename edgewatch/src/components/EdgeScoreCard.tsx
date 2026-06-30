@@ -51,21 +51,22 @@ export default function EdgeScoreCard({ score, loading }: Props) {
   return (
     <div className="edge-score-card">
       <div className="edge-score-header">
-        <h3 className="edge-score-title">EdgeScore</h3>
+        <h3 className="edge-score-title">Entry Timing Score</h3>
         <ConfidenceBadge level={score.sampleConfidence} />
         {loading && <span className="score-loading-badge">Fetching live prices…</span>}
       </div>
 
       <div className="score-disclaimer">
-        Entry-based edge: measures whether market price moved in this wallet's direction
-        after each trade entry. Size-weighted across {score.sampleSize} trades / {score.marketsTraded} markets.
+        Entry-timing analysis only — measures whether market price moved in this wallet&apos;s direction
+        after each trade entry. Not overall trader reliability.
+        Size-weighted across {score.sampleSize} trades / {score.marketsTraded} markets.
         <br />
         <strong>Not financial advice. Estimated signal only.</strong>
       </div>
 
       <div className="score-rings">
-        <ScoreRing value={score.overall} label="Overall" />
-        <ScoreRing value={score.entryEdgeScore} label="Entry Edge" />
+        <ScoreRing value={score.overall} label="Overall timing" />
+        <ScoreRing value={score.entryEdgeScore} label="Entry timing" />
         <ScoreRing value={score.repeatabilityScore} label="Repeatability" />
       </div>
 
@@ -98,16 +99,17 @@ export default function EdgeScoreCard({ score, loading }: Props) {
           <span className="score-detail-val">{formatUSD(score.totalVolumeUSDC)} <span className="estimate-label">(real)</span></span>
         </div>
         <div className="score-detail-row">
-          <span className="score-detail-label">Confidence</span>
+          <span className="score-detail-label">Entry timing data confidence</span>
           <span className="score-detail-val">{confidenceLabel(score.sampleConfidence)}</span>
         </div>
       </div>
 
       <p className="score-footnote">
-        Entry Edge: (currentPrice − entryPrice) × sizeUSDC per trade, normalized.
+        Entry timing: (currentPrice − entryPrice) × sizeUSDC per trade, normalized.
         Current price = latest CLOB trade for the specific outcome token.
         Repeatability: rewards wallets active across many markets with multiple entries each.
-        Score is meaningless at very_low confidence — fewer than 5 trades.
+        Entry timing score is meaningless at very low data confidence — fewer than 5 trades.
+        This does not override realized PnL, win rate, or copy reliability gates.
       </p>
     </div>
   )

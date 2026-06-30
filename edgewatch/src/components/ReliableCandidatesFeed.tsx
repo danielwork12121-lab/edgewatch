@@ -32,7 +32,7 @@ function ReliableTraderCard({ trader, rank, onSelectWallet }: { trader: HotTrade
               {trader.copySignal}
             </span>
             <span className={`confidence-badge ${trader.confidence === 'High' ? 'badge-green' : trader.confidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
-              {trader.confidence} confidence
+              Data confidence {trader.confidence}
             </span>
           </div>
         </div>

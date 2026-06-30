@@ -5,11 +5,12 @@ import { batchFetchPrices } from './priceTracker'
 import { cacheGet, cacheSet, TTL } from './cache'
 import {
   categorizeQualityRejection,
-  computeRepeatableTraderQuality,
+  evaluateTraderQuality,
   summarizeActiveBets,
   type ActiveBetSummary,
   type CandidateTier,
   type FollowBacktest,
+  type TraderQualityEvaluation,
 } from './traderQuality'
 
 export interface HotTraderEntry {
@@ -24,6 +25,7 @@ export interface HotTraderEntry {
   recentQualityScore: number
   copySignal: 'COPY' | 'WATCH' | 'IGNORE'
   confidence: 'Low' | 'Medium' | 'High'
+  dataConfidenceLabel: string
   recentTradeCount: number
   recentVolumeUSDC: number
   avgTradeSize: number
@@ -591,56 +593,47 @@ function buildNearMisses(ignored: HotTraderEntry[], limit = 5): NearMissEntry[] 
 
 function applyQualityToEntry(
   entry: HotTraderEntry,
-  quality: ReturnType<typeof computeRepeatableTraderQuality>,
+  evaluation: TraderQualityEvaluation,
   candidateSource: string,
   positions: WalletPosition[],
 ): HotTraderEntry {
-  const copySignal =
-    quality.tier === 'reliable' ? 'COPY' as const :
-    quality.tier === 'watch' || quality.tier === 'emerging' ? 'WATCH' as const :
-    'IGNORE' as const
-
-  const reliabilityLabel =
-    quality.tier === 'reliable' ? 'Reliable candidate' :
-    quality.tier === 'watch' ? 'Strong watch candidate' :
-    quality.tier === 'emerging' ? 'Emerging trader — limited evidence' :
-    quality.rejectionReason || 'Rejected'
-
   const activeBets =
-    quality.tier === 'reliable' || quality.tier === 'watch'
-      ? summarizeActiveBets(positions, quality)
+    evaluation.tier === 'reliable' || evaluation.tier === 'watch'
+      ? summarizeActiveBets(positions, evaluation)
       : []
 
   return {
     ...entry,
-    candidateTier: quality.tier,
-    copySignal,
-    reliabilityScore: quality.qualityScore,
-    qualityScore: quality.qualityScore,
-    recentQualityScore: quality.recentQualityScore,
-    realizedPnl: quality.realizedPnl,
-    openValue: quality.openValue,
-    totalPnl: quality.realizedPnl + positions.reduce((s, p) => s + toFiniteNumber(p.cashPnl, 0), 0),
-    resolvedPositions: quality.closedPositions,
-    currentLosingStreak: quality.currentLosingStreak,
-    worstLosingStreak: quality.worstLosingStreak,
-    winRate: quality.winRate,
-    profitFactor: quality.profitFactor,
-    roi: quality.roi,
-    pnlExcludingLargestWin: quality.pnlExcludingLargestWin,
-    luckyWinRisk: quality.luckyWinRisk,
-    outlierDriven: quality.outlierDriven,
-    timingEdge: quality.timingEdgePct,
-    pnl: quality.realizedPnl,
-    reliabilityLabel,
-    reliabilityReasons: quality.plainReasons,
-    plainReasons: quality.plainReasons,
-    scoreReasons: quality.plainReasons,
-    isReliableCandidate: quality.tier === 'reliable',
+    candidateTier: evaluation.tier,
+    copySignal: evaluation.copySignal,
+    confidence: evaluation.confidenceLevel,
+    dataConfidenceLabel: evaluation.dataConfidenceLabel,
+    reliabilityScore: evaluation.reliabilityScore,
+    qualityScore: evaluation.qualityScore,
+    recentQualityScore: evaluation.recentQualityScore,
+    realizedPnl: evaluation.metrics.realizedPnl,
+    openValue: evaluation.metrics.openValue,
+    totalPnl: evaluation.metrics.realizedPnl + positions.reduce((s, p) => s + toFiniteNumber(p.cashPnl, 0), 0),
+    resolvedPositions: evaluation.closedPositions,
+    currentLosingStreak: evaluation.currentLosingStreak,
+    worstLosingStreak: evaluation.worstLosingStreak,
+    winRate: evaluation.winRate,
+    profitFactor: evaluation.profitFactor,
+    roi: evaluation.roi,
+    pnlExcludingLargestWin: evaluation.pnlExcludingLargestWin,
+    luckyWinRisk: evaluation.luckyWinRisk,
+    outlierDriven: evaluation.outlierDriven,
+    timingEdge: evaluation.metrics.timingEdgePct,
+    pnl: evaluation.metrics.realizedPnl,
+    reliabilityLabel: evaluation.tierLabel,
+    reliabilityReasons: evaluation.plainReasons,
+    plainReasons: evaluation.plainReasons,
+    scoreReasons: evaluation.plainReasons,
+    isReliableCandidate: evaluation.tier === 'reliable' && evaluation.copySignal === 'COPY',
     candidateSource,
     activeBets,
-    backtest: quality.backtest,
-    rejectionReason: quality.tier === 'ignored' ? quality.rejectionReason : undefined,
+    backtest: evaluation.backtest,
+    rejectionReason: evaluation.tier === 'ignored' ? evaluation.rejectionReason : undefined,
   }
 }
 
@@ -845,6 +838,7 @@ function makeHotEntry(agg: HotWalletAgg, winRate: number | null, pnl: number | n
     recentQualityScore: 0,
     copySignal: 'IGNORE',
     confidence: 'Low',
+    dataConfidenceLabel: 'Data confidence Low · 0 records analyzed',
     recentTradeCount: agg.trades.length,
     recentVolumeUSDC: agg.volume,
     avgTradeSize: agg.volume / Math.max(agg.trades.length, 1),
@@ -1160,7 +1154,7 @@ async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = M
           closedPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.realizedPnl, 0), 0),
         )
 
-        const quality = computeRepeatableTraderQuality({
+        const evaluation = evaluateTraderQuality({
           trades: tradesForAnalysis,
           recentTrades: agg.trades,
           positions,
@@ -1177,11 +1171,10 @@ async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = M
         return applyQualityToEntry(
           {
             ...entry,
-            marketsTraded: quality.marketsTraded,
-            historicalTradeCount: quality.sampleTrades,
-            confidence: quality.closedPositions >= 20 ? 'High' : quality.closedPositions >= 10 ? 'Medium' : 'Low',
+            marketsTraded: evaluation.metrics.marketsTraded,
+            historicalTradeCount: evaluation.sampleTrades,
           },
-          quality,
+          evaluation,
           candidateSource,
           positions,
         )

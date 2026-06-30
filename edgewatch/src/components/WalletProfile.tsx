@@ -4,8 +4,7 @@ import { getWalletActivity, getWalletPositions, filterNoise, truncateAddress } f
 import { formatUSD, formatDate, formatPercent, toFiniteNumber } from '../api/polymarket'
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
 import { batchFetchPrices } from '../api/priceTracker'
-import { analyzeTraderReliability } from '../api/traders'
-import { assessPositionFollowability, computeRepeatableTraderQuality } from '../api/traderQuality'
+import { assessPositionFollowability, evaluateTraderQuality } from '../api/traderQuality'
 import { getClosedPositions } from '../api/wallets'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
@@ -314,8 +313,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
     }
   }, [filtered])
 
-  const reliability = analyzeTraderReliability(filtered, positions, livePrices)
-  const traderQuality = computeRepeatableTraderQuality({
+  const traderQuality = evaluateTraderQuality({
     trades: filtered,
     recentTrades: filtered.slice(0, 40),
     positions,
@@ -377,14 +375,11 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
         <>
           <div className="wallet-quality-banner">
             <div className="data-source-label" style={{ marginBottom: traderQuality.plainReasons.length > 0 ? 8 : 0 }}>
-              <strong>
-                {traderQuality.tier === 'reliable' ? 'Reliable candidate' :
-                  traderQuality.tier === 'watch' ? 'Strong watch candidate' :
-                  traderQuality.tier === 'emerging' ? 'Emerging trader' :
-                  traderQuality.rejectionReason || reliability?.reliabilityLabel}
-              </strong>
+              <strong>{traderQuality.tierLabel}</strong>
               {' · '}
-              Quality {traderQuality.qualityScore}/100
+              Reliability {traderQuality.reliabilityScore}/100
+              {' · '}
+              {traderQuality.dataConfidenceLabel}
               {traderQuality.luckyWinRisk ? ' · Lucky win risk flagged' : ''}
               {traderQuality.outlierDriven ? ' · Outlier-driven profit' : ''}
             </div>
@@ -469,8 +464,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               <CopyTradingModule
                 score={score}
                 trades={filtered}
-                winRate={winRate}
-                reliability={reliability}
+                traderQuality={traderQuality}
                 onViewPortfolio={onViewPortfolio}
                 onFollowMsg={msg => { setFollowMsg(msg); setTimeout(() => setFollowMsg(null), 4000) }}
               />
@@ -554,7 +548,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             )}
             {activePositions.length > 0 && (
               <>
-                {(reliability?.realizedPnl ?? 0) < 0 && openValue > Math.abs(reliability?.realizedPnl ?? 0) * 2 && (
+                {(traderQuality.metrics.realizedPnl ?? 0) < 0 && openValue > Math.abs(traderQuality.metrics.realizedPnl ?? 0) * 2 && (
                   <p className="score-disclaimer" style={{ marginBottom: 10 }}>
                     Large exposure with poor realized history.
                   </p>
