@@ -998,11 +998,30 @@
   padding: 10px 14px;
   margin-bottom: 8px;
 }
+.trade-row-clickable {
+  cursor: pointer;
+}
+.trade-row-clickable:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow);
+}
 .trade-row-top {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
+}
+.trade-row-details {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.trade-detail-line {
+  font-size: 0.82rem;
+  color: var(--text-h);
 }
 .trade-title {
   font-size: 0.85rem;

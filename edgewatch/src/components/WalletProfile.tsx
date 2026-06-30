@@ -3,6 +3,8 @@ import type { WalletTrade, WalletPosition } from '../types'
 import { getWalletActivity, getWalletPositions, filterNoise, truncateAddress } from '../api/wallets'
 import { formatUSD, formatDate, formatPercent, toFiniteNumber } from '../api/polymarket'
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
+import { batchFetchPrices } from '../api/priceTracker'
+import { analyzeTraderReliability } from '../api/traders'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
 import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
@@ -44,30 +46,52 @@ function TradeRow({
   trade,
   onFollow,
   allTradesForMarket,
+  currentPrice,
 }: {
   trade: WalletTrade
   onFollow: (t: WalletTrade) => void
   allTradesForMarket: WalletTrade[]
+  currentPrice: number | null
 }) {
   const [chartOpen, setChartOpen] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const isBuy = trade.side === 'BUY'
   const time = new Date(trade.timestamp * 1000).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   })
   const tokenId = trade.asset ?? ''
+  const entryPrice = toFiniteNumber(trade.price, Number.NaN)
+  const current = currentPrice !== null ? currentPrice : null
+  const delta = current !== null && Number.isFinite(entryPrice)
+    ? (isBuy ? current - entryPrice : entryPrice - current)
+    : null
+  const helpedReliability = delta !== null ? delta > 0 : null
+  const marketLabel = trade.eventSlug || trade.slug || trade.title
+  const currentLabel = current !== null ? formatPercent(current, 1).replace('%', '¢') : '—'
 
   return (
-    <div className="trade-row">
+    <div
+      className="trade-row trade-row-clickable"
+      role="button"
+      tabIndex={0}
+      onClick={() => setExpanded(o => !o)}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          setExpanded(o => !o)
+        }
+      }}
+    >
       <div className="trade-row-top">
         <span className={`side-badge ${isBuy ? 'buy' : 'sell'}`}>{trade.side}</span>
         <span className="trade-title">{trade.title}</span>
         <div style={{ display: 'flex', gap: 6, marginLeft: 'auto', flexShrink: 0 }}>
-          <button className="follow-btn" onClick={() => onFollow(trade)}>+ Follow</button>
+          <button className="follow-btn" onClick={e => { e.stopPropagation(); onFollow(trade) }}>+ Follow</button>
           {tokenId && (
             <button
               className="follow-btn"
               style={{ background: 'none', borderColor: 'var(--border)', color: 'var(--text)' }}
-              onClick={() => setChartOpen(o => !o)}
+              onClick={e => { e.stopPropagation(); setChartOpen(o => !o) }}
             >
               {chartOpen ? '▲' : '▼'} Chart
             </button>
@@ -80,6 +104,22 @@ function TradeRow({
         <span className="stat prob">@ {formatPercent(trade.price, 0).replace('%', '¢')}</span>
         <span className="stat date">{time}</span>
       </div>
+      {expanded && (
+        <div className="trade-row-details">
+          <div className="trade-detail-line"><strong>Market:</strong> {marketLabel}</div>
+          <div className="trade-detail-line">
+            <strong>Entry:</strong> {formatPercent(entryPrice, 1).replace('%', '¢')} · <strong>Current:</strong> {currentLabel}
+          </div>
+          <div className="trade-detail-line">
+            <strong>Reliability impact:</strong> {helpedReliability === null ? 'Unavailable' : helpedReliability ? 'Helped reliability' : 'Hurt reliability'}
+          </div>
+          {delta !== null && (
+            <div className={`trade-detail-line ${delta >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
+              <strong>Estimated PnL:</strong> {delta >= 0 ? '+' : ''}{formatUSD(Math.abs(delta) * (trade.usdcSize ?? 0))}
+            </div>
+          )}
+        </div>
+      )}
       {chartOpen && tokenId && (
         <div style={{ marginTop: 12 }}>
           <PriceChart
@@ -105,6 +145,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [score, setScore] = useState<EdgeScore | null>(null)
   const [scoreLoading, setScoreLoading] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
+  const [livePrices, setLivePrices] = useState<Map<string, number>>(new Map())
 
   const actKey = `wallet:${address}:activity`
   const posKey = `wallet:${address}:positions`
@@ -197,6 +238,24 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const pseudonym = trades[0]?.pseudonym || ''
   const name = trades[0]?.name || ''
 
+  useEffect(() => {
+    const assets = [...new Set(filtered.map(t => t.asset).filter(Boolean))].slice(0, 20)
+    if (assets.length === 0) return
+    let cancelled = false
+    batchFetchPrices(assets)
+      .then(map => {
+        if (!cancelled) setLivePrices(map)
+      })
+      .catch(() => {
+        if (!cancelled) setLivePrices(new Map())
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [filtered])
+
+  const reliability = analyzeTraderReliability(filtered, positions, livePrices)
+
   const positionsWithValue = positions.filter(p => (p.initialValue ?? 0) > 0)
   const realizedPnl = positions.reduce((s, p) => s + (p.realizedPnl ?? 0), 0)
   const openValue = positions.reduce((s, p) => s + (p.currentValue ?? 0), 0)
@@ -250,6 +309,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             score={score}
             trades={filtered}
             winRate={winRate}
+            reliability={reliability}
             onViewPortfolio={onViewPortfolio}
             onFollowMsg={msg => { setFollowMsg(msg); setTimeout(() => setFollowMsg(null), 4000) }}
           />
@@ -292,6 +352,16 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               </span>
               <span className="wallet-stat-label">Open Value</span>
             </div>
+          </div>
+
+          <div className="data-source-label" style={{ marginBottom: 16 }}>
+            <strong>{reliability?.reliabilityLabel ?? 'Active but unreliable'}</strong>
+            {' · '}
+            Reliability {reliability?.reliabilityScore ?? 0}/100
+            {' · '}
+            Copy signal {reliability?.copySignal ?? 'IGNORE'}
+            {reliability?.currentLosingStreak ? ` · Losing streak ${reliability.currentLosingStreak}` : ''}
+            {reliability?.worstLosingStreak ? ` · Worst loss streak ${reliability.worstLosingStreak}` : ''}
           </div>
 
           {/* ── Tabs ── */}
@@ -379,6 +449,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
                   trade={t}
                   onFollow={handleFollow}
                   allTradesForMarket={filtered.filter(x => x.conditionId === t.conditionId)}
+                  currentPrice={livePrices.get(t.asset) ?? null}
                 />
               ))}
               {filtered.length > 100 && (

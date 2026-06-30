@@ -14,6 +14,7 @@ import {
 } from '../api/polymarket'
 import { CATEGORIES, getCategoryKeywords, type Category } from '../api/categories'
 import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
+import ReliableCandidatesFeed from './ReliableCandidatesFeed'
 import HotTradersFeed from './HotTradersFeed'
 import TraderRanking from './TraderRanking'
 
@@ -385,6 +386,8 @@ export default function MarketSearch({
         </div>
         <p className="tagline">Watch traders first, then use markets and filters to narrow in.</p>
       </header>
+
+      <ReliableCandidatesFeed onSelectWallet={onSelectWallet} />
 
       <HotTradersFeed onSelectWallet={onSelectWallet} />
 

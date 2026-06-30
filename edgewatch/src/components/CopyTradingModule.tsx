@@ -1,33 +1,42 @@
 import type { EdgeScore } from '../api/scoring'
 import type { WalletTrade } from '../types'
 import { formatUSD } from '../api/polymarket'
+import type { TraderReliability } from '../api/traders'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 
 interface Props {
   score: EdgeScore | null
   trades: WalletTrade[]
   winRate: number | null
+  reliability: TraderReliability | null
   onViewPortfolio?: () => void
   onFollowMsg: (msg: string) => void
 }
 
 interface Recommendation {
-  action: 'COPY' | 'MONITOR' | 'AVOID'
+  action: 'COPY' | 'WATCH' | 'IGNORE'
   confidence: 'High' | 'Medium' | 'Low'
   allocationPct: number
   reasons: string[]
 }
 
-function computeRecommendation(score: EdgeScore, winRate: number | null): Recommendation {
+function computeRecommendation(score: EdgeScore, winRate: number | null, reliability: TraderReliability | null): Recommendation {
+  const reliabilityScore = reliability?.reliabilityScore ?? 0
   const confWeight = { high: 1.0, medium: 0.7, low: 0.4, very_low: 0.1 }[score.sampleConfidence]
-  const edgeFactor = score.overall / 100
-  const accuracyFactor = winRate !== null ? winRate : (score.entryEdgeScore / 100)
+  const accuracyFactor = reliability?.winRate ?? winRate ?? (score.entryEdgeScore / 100)
   const consistency = accuracyFactor * confWeight
+  const signalBase = reliabilityScore * 0.75 + score.overall * 0.25
 
-  // Base 1% + up to 9% based on edge × consistency — max 10%
-  const allocationPct = Math.min(10, Math.max(0.5, 1 + 9 * edgeFactor * consistency))
+  const allocationPct = Math.min(10, Math.max(0.5, 1 + 9 * (signalBase / 100) * Math.max(0.4, consistency)))
 
   const reasons: string[] = []
+  if (reliability) {
+    reasons.push(`✓ Reliability ${reliability.reliabilityScore}/100`)
+    reasons.push(`✓ ${reliability.reliabilityLabel}`)
+    reasons.push(`✓ Current streak ${reliability.currentLosingStreak > 0 ? `losing ${reliability.currentLosingStreak}` : 'not losing'}`)
+    reasons.push(`✓ Worst losing streak ${reliability.worstLosingStreak}`)
+    if (reliability.realizedPnl !== null) reasons.push(`✓ Realized PnL ${reliability.realizedPnl >= 0 ? '+' : ''}${formatUSD(Math.abs(reliability.realizedPnl))}`)
+  }
   if (score.sampleSize < 5) reasons.push(`⚠ Only ${score.sampleSize} trades — signal unreliable`)
   if (score.sampleSize >= 20) reasons.push(`✓ ${score.sampleSize} trades — meaningful sample`)
   if (score.entryEdgeScore >= 60) reasons.push(`✓ Consistently enters before price moves (${score.entryEdgeScore}/100 entry edge)`)
@@ -36,20 +45,19 @@ function computeRecommendation(score: EdgeScore, winRate: number | null): Recomm
   if (score.avgDeltaCents > 3) reasons.push(`✓ +${score.avgDeltaCents.toFixed(1)}¢ avg price move after entry`)
   if (score.avgDeltaCents < -3) reasons.push(`⚠ −${Math.abs(score.avgDeltaCents).toFixed(1)}¢ avg — price tends to move against entries`)
   if (score.overall < 30) reasons.push(`⚠ Low overall score (${score.overall}/100)`)
-  if (score.pricesResolved < score.sampleSize * 0.5)
-    reasons.push(`⚠ Only ${score.pricesResolved}/${score.sampleSize} trades had live prices`)
+  if (score.pricesResolved < score.sampleSize * 0.5) reasons.push(`⚠ Only ${score.pricesResolved}/${score.sampleSize} trades had live prices`)
 
   let action: Recommendation['action']
   let confidence: Recommendation['confidence']
 
-  if (score.overall >= 55 && score.sampleSize >= 10 && consistency >= 0.5) {
+  if ((reliability?.copySignal === 'COPY' && reliabilityScore >= 75) || (signalBase >= 75 && consistency >= 0.5)) {
     action = 'COPY'
-    confidence = score.overall >= 70 && score.sampleSize >= 20 ? 'High' : 'Medium'
-  } else if (score.overall < 25 || score.sampleSize < 5) {
-    action = 'AVOID'
+    confidence = reliability?.confidence === 'High' ? 'High' : 'Medium'
+  } else if (signalBase >= 50) {
+    action = 'WATCH'
     confidence = 'Low'
   } else {
-    action = 'MONITOR'
+    action = 'IGNORE'
     confidence = 'Low'
   }
 
@@ -57,15 +65,15 @@ function computeRecommendation(score: EdgeScore, winRate: number | null): Recomm
 }
 
 const ACTION_STYLES = {
-  COPY:    { badge: 'copy-action-copy',    label: '✓ COPY TRADER' },
-  MONITOR: { badge: 'copy-action-monitor', label: '~ MONITOR'     },
-  AVOID:   { badge: 'copy-action-avoid',   label: '✗ AVOID'       },
+  COPY:   { badge: 'copy-action-copy',    label: '✓ COPY' },
+  WATCH:  { badge: 'copy-action-monitor', label: '~ WATCH' },
+  IGNORE: { badge: 'copy-action-avoid',   label: '✗ IGNORE' },
 }
 
-export default function CopyTradingModule({ score, trades, winRate, onViewPortfolio, onFollowMsg }: Props) {
+export default function CopyTradingModule({ score, trades, winRate, reliability, onViewPortfolio, onFollowMsg }: Props) {
   if (!score) return null
 
-  const rec = computeRecommendation(score, winRate)
+  const rec = computeRecommendation(score, winRate, reliability)
   const { badge, label } = ACTION_STYLES[rec.action]
   const latestTrade = trades.find(t => t.type === 'TRADE')
 
