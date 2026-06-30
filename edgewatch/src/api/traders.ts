@@ -1,5 +1,5 @@
 import type { PolyEvent, WalletTrade, TraderRankEntry } from '../types'
-import { getMarketTrades, getWalletPositions, truncateAddress } from './wallets'
+import { getMarketTrades, getWalletActivity, getWalletPositions, truncateAddress } from './wallets'
 import { formatUSD, fetchTrending, searchEvents, toFiniteNumber } from './polymarket'
 import { batchFetchPrices } from './priceTracker'
 import { cacheGet, cacheSet, TTL } from './cache'
@@ -36,12 +36,15 @@ export interface HotTraderEntry {
 
 export interface CopyDiscoverySummary {
   scannedTrades: number
+  uniqueTrades: number
   scannedWallets: number
   enrichedWallets: number
   reliableCandidates: number
   watchCandidates: number
   ignoredActiveTraders: number
-  sourceCount: number
+  scanSource: string
+  apiNote: string | null
+  emptyReasons: string[]
 }
 
 export interface CopyDiscoveryDiagnostics extends HotTraderDiagnostics {
@@ -158,8 +161,13 @@ export interface HotTraderLoadResult {
 // ─── Internal helper ───────────────────────────────────────────────────────
 
 const HOT_TRADES_ENDPOINT = 'https://data-api.polymarket.com/trades?limit=200'
-const DISCOVERY_TRADES_ENDPOINT = 'https://data-api.polymarket.com/trades?limit=200'
+const DISCOVERY_TRADES_BASE = 'https://data-api.polymarket.com/trades'
 const DISCOVERY_TERMS = ['bitcoin', 'crypto', 'election', 'president', 'world cup', 'f1', 'movie', 'music', 'anime', 'ai', 'science']
+const GLOBAL_TRADE_PAGE_SIZE = 200
+const INITIAL_GLOBAL_PAGES = 5
+const DEEP_SCAN_EXTRA_PAGES = 5
+const MAX_ENRICH_WALLETS = 50
+const MAX_CANDIDATE_WALLETS = 80
 
 const devLog = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.debug('[EdgeWatch][hot-traders]', ...args)
@@ -519,6 +527,149 @@ export function analyzeTraderReliability(
   }
 }
 
+function assessDiscoveryWatchEligibility(
+  agg: HotWalletAgg,
+  reliability: TraderReliability,
+  timingEdgePct: number | null,
+): boolean {
+  if (reliability.hardFailReasons.length > 0) return false
+  if (reliability.isReliableCandidate) return false
+  if (reliability.copySignal === 'WATCH') return true
+
+  const noSeverePnL = reliability.realizedPnl === null || reliability.realizedPnl >= -250
+  const noTerribleWinRate =
+    reliability.winRate === null ||
+    reliability.sampleSize < 8 ||
+    reliability.winRate >= 0.32
+  const acceptableStreak =
+    reliability.currentLosingStreak < 4 &&
+    reliability.worstLosingStreak < 12
+  const noLuckyWinPattern =
+    reliability.profitFactor === null ||
+    reliability.profitFactor >= 0.55 ||
+    reliability.winRate === null ||
+    reliability.winRate >= 0.35
+
+  if (!noSeverePnL || !noTerribleWinRate || !acceptableStreak || !noLuckyWinPattern) return false
+
+  const strongScanActivity =
+    agg.trades.length >= 2 &&
+    agg.markets.size >= 2 &&
+    agg.volume >= 40
+  const goodTiming =
+    timingEdgePct !== null &&
+    timingEdgePct >= 52 &&
+    agg.trades.length >= 2
+  const moderateReliability =
+    reliability.reliabilityScore >= 42 &&
+    reliability.sampleSize >= 5
+  const positiveHistory =
+    reliability.realizedPnl !== null &&
+    reliability.realizedPnl >= 0 &&
+    reliability.currentLosingStreak < 3
+
+  return strongScanActivity && (goodTiming || moderateReliability || positiveHistory)
+}
+
+function applyDiscoveryTier(
+  entry: HotTraderEntry,
+  agg: HotWalletAgg,
+  reliability: TraderReliability,
+): HotTraderEntry {
+  if (reliability.isReliableCandidate) {
+    return {
+      ...entry,
+      candidateTier: 'reliable',
+      copySignal: 'COPY',
+      reliabilityLabel: 'Reliable candidate',
+      isReliableCandidate: true,
+    }
+  }
+
+  if (reliability.hardFailReasons.length > 0) {
+    return {
+      ...entry,
+      candidateTier: 'ignored',
+      copySignal: 'IGNORE',
+      isReliableCandidate: false,
+    }
+  }
+
+  if (assessDiscoveryWatchEligibility(agg, reliability, entry.timingEdge)) {
+    return {
+      ...entry,
+      candidateTier: 'watch',
+      copySignal: 'WATCH',
+      reliabilityLabel: reliability.reliabilityLabel === 'Active but unreliable'
+        ? 'Watch candidate'
+        : reliability.reliabilityLabel,
+      isReliableCandidate: false,
+    }
+  }
+
+  return {
+    ...entry,
+    candidateTier: 'ignored',
+    copySignal: 'IGNORE',
+    isReliableCandidate: false,
+  }
+}
+
+function dedupeNormalizedTrades(trades: HotTradeNormalized[]): HotTradeNormalized[] {
+  const deduped = new Map<string, HotTradeNormalized>()
+  for (const trade of trades) {
+    const key = [
+      trade.address,
+      trade.marketKey,
+      trade.timestamp,
+      trade.price.toFixed(4),
+      trade.volumeUSDC.toFixed(2),
+    ].join('|')
+    if (!deduped.has(key)) deduped.set(key, trade)
+  }
+  return [...deduped.values()]
+}
+
+function describeScanSource(globalCount: number, marketCount: number, marketPools: number): string {
+  const parts: string[] = []
+  if (globalCount > 0) parts.push(`global trades (${globalCount})`)
+  if (marketCount > 0) parts.push(`market trades (${marketCount} from ${marketPools} pools)`)
+  if (parts.length === 0) return 'no trade sources'
+  if (parts.length === 2) return `mixed: ${parts.join(' + ')}`
+  return parts[0]
+}
+
+function buildEmptyReasons(
+  summary: CopyDiscoverySummary,
+  diagnostics: CopyDiscoveryDiagnostics,
+): string[] {
+  const reasons: string[] = []
+  if (summary.reliableCandidates > 0 || summary.watchCandidates > 0) return reasons
+
+  if (summary.scannedTrades < 300) {
+    reasons.push('Trade sample was small — try refreshing for a deeper scan.')
+  }
+  if (summary.apiNote) {
+    reasons.push(summary.apiNote)
+  }
+  if (diagnostics.discardedReasons.below_volume_floor) {
+    reasons.push('Many trades were below the minimum size filter.')
+  }
+  const gateFailures = diagnostics.ignoredActiveTraders
+  if (gateFailures > 0 && summary.enrichedWallets > 0) {
+    reasons.push(
+      `${gateFailures} active wallet${gateFailures === 1 ? '' : 's'} failed reliability gates (win rate, PnL, or losing streak).`,
+    )
+  }
+  if (summary.enrichedWallets === 0 && summary.scannedWallets > 0) {
+    reasons.push('No wallets were enriched with position data.')
+  }
+  if (reasons.length === 0) {
+    reasons.push('No wallets met copy-ready or watchlist criteria in this scan — the market may simply lack strong candidates right now.')
+  }
+  return reasons
+}
+
 async function fetchAndRank(tokenIds: string[], minTrades = 1): Promise<{
   traders: TraderRankEntry[]
   allTrades: WalletTrade[]
@@ -724,8 +875,12 @@ function uniqueEvents(events: PolyEvent[]): PolyEvent[] {
   })
 }
 
-async function fetchGlobalTradeSample(limit = 200): Promise<{ normalized: HotTradeNormalized[]; rawCount: number; rawSamples: unknown[]; status: number | null; contentType: string | null }> {
-  const res = await fetch(`${DISCOVERY_TRADES_ENDPOINT.replace('limit=200', `limit=${limit}`)}`)
+async function fetchGlobalTradeSample(
+  limit = GLOBAL_TRADE_PAGE_SIZE,
+  offset = 0,
+): Promise<{ normalized: HotTradeNormalized[]; rawCount: number; rawSamples: unknown[]; status: number | null; contentType: string | null }> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  const res = await fetch(`${DISCOVERY_TRADES_BASE}?${params}`)
   const contentType = res.headers.get('content-type')
   const text = await res.text()
   let parsed: unknown
@@ -748,6 +903,34 @@ async function fetchGlobalTradeSample(limit = 200): Promise<{ normalized: HotTra
     rawSamples: rawTrades.slice(0, 3),
     status: res.status,
     contentType,
+  }
+}
+
+async function fetchGlobalTradePages(
+  pages: number,
+  startPage = 0,
+): Promise<{ normalized: HotTradeNormalized[]; rawCount: number; rawSamples: unknown[]; status: number | null; contentType: string | null }> {
+  const settled = await Promise.allSettled(
+    Array.from({ length: pages }, (_, i) =>
+      fetchGlobalTradeSample(GLOBAL_TRADE_PAGE_SIZE, (startPage + i) * GLOBAL_TRADE_PAGE_SIZE),
+    ),
+  )
+
+  const fulfilled = settled.filter(
+    (result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchGlobalTradeSample>>> =>
+      result.status === 'fulfilled',
+  )
+
+  const normalized = fulfilled.flatMap(result => result.value.normalized)
+  const rawCount = fulfilled.reduce((sum, result) => sum + result.value.rawCount, 0)
+  const first = fulfilled[0]?.value
+
+  return {
+    normalized,
+    rawCount,
+    rawSamples: first?.rawSamples ?? [],
+    status: first?.status ?? null,
+    contentType: first?.contentType ?? null,
   }
 }
 
@@ -822,19 +1005,48 @@ async function fetchDiscoveryMarketTrades(events: PolyEvent[], limitPerMarket = 
   }
 }
 
-async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = 24): Promise<HotTraderEntry[]> {
+async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = MAX_ENRICH_WALLETS): Promise<HotTraderEntry[]> {
   const toEnrich = aggregates.slice(0, maxEnrich)
   const rest = aggregates.slice(maxEnrich).map(agg => makeHotEntry(agg, null, null))
 
   const enriched = await Promise.allSettled(
     toEnrich.map(async agg => {
-      const entry = makeHotEntry(agg, null, null)
       try {
-        const positions = await getWalletPositions(agg.address, 100)
-        const assets = [...new Set(agg.trades.map(t => t.asset).filter(Boolean))].slice(0, 20)
+        const [positions, activity] = await Promise.all([
+          getWalletPositions(agg.address, 100),
+          getWalletActivity(agg.address, 200),
+        ])
+        const tradesForAnalysis =
+          activity.filter(t => t.type === 'TRADE' && (t.usdcSize ?? 0) >= 1).length >= 2
+            ? activity.filter(t => t.type === 'TRADE' && (t.usdcSize ?? 0) >= 1)
+            : agg.trades
+
+        const assets = [...new Set([
+          ...tradesForAnalysis.map(t => t.asset),
+          ...agg.trades.map(t => t.asset),
+        ].filter(Boolean))].slice(0, 24)
         const priceMap = await batchFetchPrices(assets)
-        const reliability = analyzeTraderReliability(agg.trades, positions, priceMap)
-        return {
+
+        let positiveMoves = 0
+        let resolvedMoves = 0
+        for (const trade of agg.trades) {
+          const cur = priceMap.get(trade.asset)
+          if (cur === undefined || !trade.price || trade.price <= 0) continue
+          const delta = trade.side === 'BUY' ? cur - trade.price : trade.price - cur
+          resolvedMoves += 1
+          if (delta > 0) positiveMoves += 1
+        }
+        agg.positiveMoves = positiveMoves
+        agg.resolvedMoves = resolvedMoves
+
+        const entry = makeHotEntry(
+          agg,
+          null,
+          positions.reduce((sum, pos) => sum + toFiniteNumber(pos.cashPnl, 0), 0),
+        )
+
+        const reliability = analyzeTraderReliability(tradesForAnalysis, positions, priceMap)
+        const merged = {
           ...entry,
           reliabilityScore: reliability.reliabilityScore,
           copySignal: reliability.copySignal,
@@ -845,13 +1057,16 @@ async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = 2
           resolvedPositions: reliability.resolvedPositions,
           currentLosingStreak: reliability.currentLosingStreak,
           worstLosingStreak: reliability.worstLosingStreak,
+          winRate: reliability.winRate,
+          pnl: reliability.totalPnl,
           reliabilityLabel: reliability.reliabilityLabel,
           reliabilityReasons: reliability.reliabilityReasons,
           isReliableCandidate: reliability.isReliableCandidate,
           candidateTier: reliability.candidateTier,
         }
+        return applyDiscoveryTier(merged, agg, reliability)
       } catch {
-        return entry
+        return makeHotEntry(agg, null, null)
       }
     })
   )
@@ -1032,12 +1247,12 @@ function sortHotTraderEntries(entries: HotTraderEntry[]): HotTraderEntry[] {
 }
 
 export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryResult> {
-  const key = `copy-discovery:v2:${limit}`
+  const key = `copy-discovery:v3:${limit}`
   const cached = cacheGet<CopyDiscoveryResult>(key, TTL.discovery)
   if (cached !== null) return cached
 
   const diagnostics: CopyDiscoveryDiagnostics = {
-    endpoint: DISCOVERY_TRADES_ENDPOINT,
+    endpoint: DISCOVERY_TRADES_BASE,
     status: null,
     rawType: 'unknown',
     contentType: null,
@@ -1060,74 +1275,102 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
     diagnostics.sourceBreakdown[source] = (diagnostics.sourceBreakdown[source] ?? 0) + count
   }
 
+  const runDiscoveryPass = async (
+    globalPages: number,
+    globalStartPage: number,
+    marketLimitPerPool: number,
+    maxMarketPools: number,
+  ) => {
+    const globalSample = await fetchGlobalTradePages(globalPages, globalStartPage)
+    const events = await fetchDiscoveryMarketEvents()
+    diagnostics.marketPoolsScanned = Math.max(diagnostics.marketPoolsScanned, events.length)
+    const marketSample = await fetchDiscoveryMarketTrades(events, marketLimitPerPool, maxMarketPools)
+    return { globalSample, marketSample, events }
+  }
+
   try {
-    const globalSample = await fetchGlobalTradeSample(200)
+    let globalPagesFetched = INITIAL_GLOBAL_PAGES
+    const { globalSample, marketSample } = await runDiscoveryPass(INITIAL_GLOBAL_PAGES, 0, 100, 28)
+
     diagnostics.status = globalSample.status
     diagnostics.contentType = globalSample.contentType
     diagnostics.rawType = 'array'
-    diagnostics.rawTradeCount += globalSample.rawCount
     diagnostics.rawSamples = globalSample.rawSamples
-    diagnostics.normalizedTradeCount += globalSample.normalized.length
     countSource('global', globalSample.normalized.length)
-
-    const events = await fetchDiscoveryMarketEvents()
-    diagnostics.marketPoolsScanned = events.length
-    const marketSample = await fetchDiscoveryMarketTrades(events, 80, 20)
-    diagnostics.rawTradeCount += marketSample.rawCount
-    diagnostics.normalizedTradeCount += marketSample.normalized.length
     countSource('markets', marketSample.normalized.length)
-    countSource('events', events.length)
 
-    const normalized = [...globalSample.normalized, ...marketSample.normalized]
-    const deduped = new Map<string, HotTradeNormalized>()
-    for (const trade of normalized) {
-      const key = [
-        trade.address,
-        trade.marketKey,
-        trade.timestamp,
-        trade.price.toFixed(4),
-        trade.volumeUSDC.toFixed(2),
-      ].join('|')
-      if (!deduped.has(key)) deduped.set(key, trade)
+    let normalized = [...globalSample.normalized, ...marketSample.normalized]
+    let dedupedTrades = dedupeNormalizedTrades(normalized)
+    let walletMap = aggregateNormalizedTrades(dedupedTrades, () => {})
+
+    const enrichAndClassify = async () => {
+      const candidateAggs = [...walletMap.values()]
+        .filter(agg => agg.trades.length >= 1 && agg.volume >= 1)
+        .sort((a, b) => computeHotScore(b) - computeHotScore(a))
+        .slice(0, MAX_CANDIDATE_WALLETS)
+
+      diagnostics.candidateWallets = candidateAggs.length
+      const enriched = await enrichTraderReliability(candidateAggs, MAX_ENRICH_WALLETS)
+      diagnostics.enrichedWallets = Math.min(candidateAggs.length, MAX_ENRICH_WALLETS)
+
+      const reliable = enriched.filter(entry => entry.candidateTier === 'reliable')
+      const watchlist = enriched.filter(entry => entry.candidateTier === 'watch')
+      const ignored = enriched.filter(entry => entry.candidateTier === 'ignored')
+
+      return { reliable, watchlist, ignored, enriched }
     }
 
-    const walletMap = aggregateNormalizedTrades([...deduped.values()], () => {})
+    let { reliable, watchlist, ignored } = await enrichAndClassify()
+
+    if (reliable.length === 0 && watchlist.length === 0) {
+      const deepGlobal = await fetchGlobalTradePages(DEEP_SCAN_EXTRA_PAGES, globalPagesFetched)
+      globalPagesFetched += DEEP_SCAN_EXTRA_PAGES
+      countSource('global-deep', deepGlobal.normalized.length)
+      normalized = [...normalized, ...deepGlobal.normalized]
+      dedupedTrades = dedupeNormalizedTrades(normalized)
+      walletMap = aggregateNormalizedTrades(dedupedTrades, () => {})
+      const deepMarket = await fetchDiscoveryMarketTrades(
+        await fetchDiscoveryMarketEvents(),
+        120,
+        36,
+      )
+      countSource('markets-deep', deepMarket.normalized.length)
+      normalized = [...normalized, ...deepMarket.normalized]
+      dedupedTrades = dedupeNormalizedTrades(normalized)
+      walletMap = aggregateNormalizedTrades(dedupedTrades, () => {})
+      ;({ reliable, watchlist, ignored } = await enrichAndClassify())
+    }
+
+    diagnostics.rawTradeCount = normalized.length
+    diagnostics.normalizedTradeCount = dedupedTrades.length
     diagnostics.walletGroupCount = walletMap.size
 
     if (walletMap.size === 0) {
+      const apiNote = `Polymarket API returns up to ${GLOBAL_TRADE_PAGE_SIZE} trades per request; scanned ${globalPagesFetched} global page(s).`
+      const summary: CopyDiscoverySummary = {
+        scannedTrades: normalized.length,
+        uniqueTrades: dedupedTrades.length,
+        scannedWallets: 0,
+        enrichedWallets: 0,
+        reliableCandidates: 0,
+        watchCandidates: 0,
+        ignoredActiveTraders: 0,
+        scanSource: describeScanSource(globalSample.normalized.length, marketSample.normalized.length, diagnostics.marketPoolsScanned),
+        apiNote,
+        emptyReasons: ['No wallets appeared in the trade sample.'],
+      }
       const result: CopyDiscoveryResult = {
         state: 'empty',
         message: 'No candidate wallets found in the current scan.',
         reliable: [],
         watchlist: [],
         ignored: [],
-        summary: {
-          scannedTrades: diagnostics.rawTradeCount,
-          scannedWallets: 0,
-          enrichedWallets: 0,
-          reliableCandidates: 0,
-          watchCandidates: 0,
-          ignoredActiveTraders: 0,
-          sourceCount: Object.keys(diagnostics.sourceBreakdown).length,
-        },
+        summary,
         diagnostics,
       }
       cacheSet(key, result)
       return result
     }
-
-    const candidateAggs = [...walletMap.values()]
-      .sort((a, b) => computeHotScore(b) - computeHotScore(a))
-      .slice(0, 60)
-
-    diagnostics.candidateWallets = candidateAggs.length
-
-    const enriched = await enrichTraderReliability(candidateAggs, 50)
-    diagnostics.enrichedWallets = Math.min(candidateAggs.length, 50)
-
-    const reliable = enriched.filter(entry => entry.candidateTier === 'reliable')
-    const watchlist = enriched.filter(entry => entry.candidateTier === 'watch' && !entry.isReliableCandidate)
-    const ignored = enriched.filter(entry => entry.candidateTier === 'ignored')
 
     const reliableSorted = sortHotTraderEntries(reliable).slice(0, limit)
     const watchSorted = sortHotTraderEntries(watchlist).slice(0, limit)
@@ -1141,47 +1384,67 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
 
     const hasReliable = reliableSorted.length > 0
     const hasWatch = watchSorted.length > 0
+    const globalTradeCount = diagnostics.sourceBreakdown.global ?? 0
+    const marketTradeCount =
+      (diagnostics.sourceBreakdown.markets ?? 0) +
+      (diagnostics.sourceBreakdown['markets-deep'] ?? 0)
+    const apiNote =
+      globalPagesFetched >= INITIAL_GLOBAL_PAGES + DEEP_SCAN_EXTRA_PAGES
+        ? `Deep scan ran (${globalPagesFetched} global pages × ${GLOBAL_TRADE_PAGE_SIZE} trades/page). API caps each request at ${GLOBAL_TRADE_PAGE_SIZE} trades.`
+        : globalPagesFetched > 1
+          ? `Scanned ${globalPagesFetched} global pages (${GLOBAL_TRADE_PAGE_SIZE} trades/page max per request).`
+          : null
+
+    const summary: CopyDiscoverySummary = {
+      scannedTrades: normalized.length,
+      uniqueTrades: dedupedTrades.length,
+      scannedWallets: diagnostics.walletGroupCount,
+      enrichedWallets: diagnostics.enrichedWallets,
+      reliableCandidates: diagnostics.reliableCandidates,
+      watchCandidates: diagnostics.watchCandidates,
+      ignoredActiveTraders: diagnostics.ignoredActiveTraders,
+      scanSource: describeScanSource(globalTradeCount, marketTradeCount, diagnostics.marketPoolsScanned),
+      apiNote,
+      emptyReasons: [],
+    }
+    summary.emptyReasons = buildEmptyReasons(summary, diagnostics)
 
     const result: CopyDiscoveryResult = {
       state: hasReliable || hasWatch ? 'ok' : 'empty',
       message: hasReliable
         ? 'Copy-ready wallets found.'
         : hasWatch
-          ? 'No copy-ready wallets found in current scan. Showing watchlist candidates below.'
-          : 'No copy-ready or watchlist candidates found in current scan.',
+          ? 'No copy-ready wallets found in this scan. Showing watchlist candidates if available.'
+          : 'No copy-ready or watchlist candidates found in this scan.',
       reliable: reliableSorted,
       watchlist: watchSorted,
       ignored: ignoredSorted,
-      summary: {
-        scannedTrades: diagnostics.rawTradeCount,
-        scannedWallets: diagnostics.walletGroupCount,
-        enrichedWallets: diagnostics.enrichedWallets,
-        reliableCandidates: diagnostics.reliableCandidates,
-        watchCandidates: diagnostics.watchCandidates,
-        ignoredActiveTraders: diagnostics.ignoredActiveTraders,
-        sourceCount: Object.keys(diagnostics.sourceBreakdown).length,
-      },
+      summary,
       diagnostics,
     }
     cacheSet(key, result)
     devLog('copy discovery complete', diagnostics)
     return result
   } catch (error) {
+    const summary: CopyDiscoverySummary = {
+      scannedTrades: diagnostics.rawTradeCount,
+      uniqueTrades: diagnostics.normalizedTradeCount,
+      scannedWallets: diagnostics.walletGroupCount,
+      enrichedWallets: diagnostics.enrichedWallets,
+      reliableCandidates: diagnostics.reliableCandidates,
+      watchCandidates: diagnostics.watchCandidates,
+      ignoredActiveTraders: diagnostics.ignoredActiveTraders,
+      scanSource: 'unknown',
+      apiNote: null,
+      emptyReasons: ['Scan failed before completion.'],
+    }
     const result: CopyDiscoveryResult = {
       state: 'error',
       message: error instanceof Error ? error.message : 'Could not load candidate discovery',
       reliable: [],
       watchlist: [],
       ignored: [],
-      summary: {
-        scannedTrades: diagnostics.rawTradeCount,
-        scannedWallets: diagnostics.walletGroupCount,
-        enrichedWallets: diagnostics.enrichedWallets,
-        reliableCandidates: diagnostics.reliableCandidates,
-        watchCandidates: diagnostics.watchCandidates,
-        ignoredActiveTraders: diagnostics.ignoredActiveTraders,
-        sourceCount: Object.keys(diagnostics.sourceBreakdown).length,
-      },
+      summary,
       diagnostics,
     }
     devLog('copy discovery error', { error, diagnostics })

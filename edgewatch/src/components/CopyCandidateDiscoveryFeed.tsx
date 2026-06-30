@@ -8,6 +8,8 @@ interface Props {
   onSelectWallet: (address: string) => void
 }
 
+const CACHE_KEY = 'copy-discovery:v3:8'
+
 const devLog = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.debug('[EdgeWatch][copy-discovery]', ...args)
 }
@@ -84,6 +86,63 @@ function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onS
   )
 }
 
+function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
+  const { summary } = result
+  const showEmptyReasons =
+    summary.reliableCandidates === 0 &&
+    summary.watchCandidates === 0 &&
+    summary.emptyReasons.length > 0
+
+  return (
+    <div className="scan-summary-panel">
+      <div className="scan-summary-grid">
+        <div className="scan-summary-stat">
+          <span className="scan-summary-value">{summary.scannedTrades.toLocaleString()}</span>
+          <span className="scan-summary-label">trades scanned</span>
+        </div>
+        <div className="scan-summary-stat">
+          <span className="scan-summary-value">{summary.uniqueTrades.toLocaleString()}</span>
+          <span className="scan-summary-label">unique after dedup</span>
+        </div>
+        <div className="scan-summary-stat">
+          <span className="scan-summary-value">{summary.scannedWallets}</span>
+          <span className="scan-summary-label">wallets found</span>
+        </div>
+        <div className="scan-summary-stat">
+          <span className="scan-summary-value">{summary.enrichedWallets}</span>
+          <span className="scan-summary-label">wallets enriched</span>
+        </div>
+        <div className="scan-summary-stat">
+          <span className="scan-summary-value">{summary.reliableCandidates}</span>
+          <span className="scan-summary-label">copy-ready</span>
+        </div>
+        <div className="scan-summary-stat">
+          <span className="scan-summary-value">{summary.watchCandidates}</span>
+          <span className="scan-summary-label">watchlist</span>
+        </div>
+        <div className="scan-summary-stat">
+          <span className="scan-summary-value">{summary.ignoredActiveTraders}</span>
+          <span className="scan-summary-label">ignored</span>
+        </div>
+      </div>
+      <p className="scan-summary-source">
+        Source: {summary.scanSource}
+        {summary.apiNote ? ` · ${summary.apiNote}` : ''}
+      </p>
+      {showEmptyReasons && (
+        <div className="scan-summary-empty">
+          <strong>Why no candidates?</strong>
+          <ul>
+            {summary.emptyReasons.map((reason, index) => (
+              <li key={index}>{reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
   const [result, setResult] = useState<CopyDiscoveryResult | null>(null)
   const [loading, setLoading] = useState(true)
@@ -94,7 +153,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
   const load = useCallback((forceRefresh = false) => {
     setLoading(true)
     setError(null)
-    if (forceRefresh) cacheInvalidate('copy-discovery:v2:8')
+    if (forceRefresh) cacheInvalidate(CACHE_KEY)
     discoverCopyCandidates(8)
       .then(next => {
         setResult(next)
@@ -118,10 +177,9 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
     return () => window.clearTimeout(timer)
   }, [load])
 
-  const summary = result?.summary
   const showReliable = (result?.reliable ?? []).length > 0
-  const showWatch = (result?.watchlist ?? []).length > 0
-  const ignoredCount = (result?.ignored ?? []).length
+  const showWatch = !showReliable && (result?.watchlist ?? []).length > 0
+  const ignoredCount = result?.summary.ignoredActiveTraders ?? 0
 
   return (
     <section className="homepage-section hot-traders-section">
@@ -129,11 +187,11 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
         <div>
           <h2 className="section-title">Copy Candidate Discovery</h2>
           <p className="section-subtitle">
-            Broad scan of recent trades, active markets, and positions. Copy-ready wallets stay separate from watch-only and ignored traders.
+            Broad scan of recent trades, active markets, and wallet history. Copy-ready wallets stay separate from watch-only and ignored traders.
           </p>
         </div>
         <div className="refresh-bar">
-          {lastUpdated && <span className="last-updated">{formatAge(cacheTime('copy-discovery:v2:8') ?? lastUpdated)}</span>}
+          {lastUpdated && <span className="last-updated">{formatAge(cacheTime(CACHE_KEY) ?? lastUpdated)}</span>}
           <button type="button" className="refresh-btn" onClick={() => load(true)} disabled={loading} title="Rescan candidate wallets">
             ↻
           </button>
@@ -143,16 +201,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
       {loading && <p className="empty-msg">Scanning for candidate wallets…</p>}
       {error && <p className="error-msg">{error}</p>}
 
-      {summary && (
-        <div className="scan-summary">
-          <span>Scanned {summary.scannedTrades} trades</span>
-          <span>{summary.scannedWallets} wallets</span>
-          <span>{summary.enrichedWallets} enriched</span>
-          <span>{summary.reliableCandidates} reliable</span>
-          <span>{summary.watchCandidates} watch</span>
-          <span>{summary.ignoredActiveTraders} ignored</span>
-        </div>
-      )}
+      {result && !loading && <ScanSummaryPanel result={result} />}
 
       {!loading && !error && result && result.message && (
         <p className="score-disclaimer" style={{ marginBottom: 12 }}>
@@ -186,8 +235,10 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
         </div>
       )}
 
-      {!loading && !showReliable && showWatch && (
-        <p className="empty-msg">No copy-ready wallets found in current scan. Showing watchlist candidates below.</p>
+      {!loading && !showReliable && !showWatch && result && result.state !== 'error' && (
+        <p className="empty-msg">
+          No copy-ready or watchlist candidates found in this scan.
+        </p>
       )}
 
       {!loading && ignoredCount > 0 && (
