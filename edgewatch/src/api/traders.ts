@@ -32,6 +32,18 @@ export interface HotTraderEntry {
   reliabilityReasons: string[]
   scoreReasons: string[]
   isReliableCandidate: boolean
+  historicalTradeCount: number
+  rejectionReason?: string
+}
+
+export interface NearMissEntry {
+  address: string
+  label: string
+  reliabilityScore: number
+  winRate: number | null
+  realizedPnl: number | null
+  tradeCount: number
+  rejectionReason: string
 }
 
 export interface CopyDiscoverySummary {
@@ -45,6 +57,7 @@ export interface CopyDiscoverySummary {
   scanSource: string
   apiNote: string | null
   emptyReasons: string[]
+  rejectionBreakdown: Record<string, number>
 }
 
 export interface CopyDiscoveryDiagnostics extends HotTraderDiagnostics {
@@ -63,6 +76,7 @@ export interface CopyDiscoveryResult {
   reliable: HotTraderEntry[]
   watchlist: HotTraderEntry[]
   ignored: HotTraderEntry[]
+  nearMisses: NearMissEntry[]
   summary: CopyDiscoverySummary
   diagnostics: CopyDiscoveryDiagnostics
 }
@@ -527,54 +541,150 @@ export function analyzeTraderReliability(
   }
 }
 
-function assessDiscoveryWatchEligibility(
+type WatchRejectionCategory =
+  | 'hard_fail'
+  | 'too_little_history'
+  | 'negative_pnl'
+  | 'poor_win_rate'
+  | 'severe_losing_streak'
+  | 'weak_sample'
+  | 'low_reliability'
+  | 'no_promising_signal'
+  | 'concentration_risk'
+
+interface WatchlistEvaluation {
+  eligible: boolean
+  rejectionReason: string
+  rejectionCategory: WatchRejectionCategory | null
+}
+
+function evaluateWatchlistCandidate(
   agg: HotWalletAgg,
   reliability: TraderReliability,
   timingEdgePct: number | null,
-): boolean {
-  if (reliability.hardFailReasons.length > 0) return false
-  if (reliability.isReliableCandidate) return false
-  if (reliability.copySignal === 'WATCH') return true
+  marketsTraded: number,
+): WatchlistEvaluation {
+  const recentTrades = agg.trades.length
+  const historicalTrades = reliability.sampleSize
+  const livePricedTrades = reliability.winCount + reliability.lossCount
+  const realizedPnl = reliability.realizedPnl
+  const profitFactor = reliability.profitFactor
 
-  const noSeverePnL = reliability.realizedPnl === null || reliability.realizedPnl >= -250
-  const noTerribleWinRate =
-    reliability.winRate === null ||
-    reliability.sampleSize < 8 ||
-    reliability.winRate >= 0.32
-  const acceptableStreak =
+  const reject = (
+    reason: string,
+    category: WatchRejectionCategory,
+  ): WatchlistEvaluation => ({ eligible: false, rejectionReason: reason, rejectionCategory: category })
+
+  if (reliability.isReliableCandidate) {
+    return { eligible: false, rejectionReason: 'Already copy-ready', rejectionCategory: null }
+  }
+
+  if (reliability.hardFailReasons.length > 0) {
+    return reject(reliability.hardFailReasons[0], 'hard_fail')
+  }
+
+  if (realizedPnl !== null && realizedPnl < 0 && (profitFactor ?? 0) <= 1.1) {
+    return reject('Negative realized PnL with weak profit factor', 'negative_pnl')
+  }
+  if (reliability.resolvedPositions < 10) {
+    return reject('Too few closed positions (<10)', 'too_little_history')
+  }
+  if (recentTrades < 5) {
+    return reject(`Too few recent trades (${recentTrades} < 5)`, 'weak_sample')
+  }
+  if (marketsTraded < 2) {
+    return reject(`Too few unique markets (${marketsTraded} < 2)`, 'weak_sample')
+  }
+  if (reliability.winRate !== null && reliability.winRate < 0.45) {
+    return reject(`Win rate below 45% (${(reliability.winRate * 100).toFixed(0)}%)`, 'poor_win_rate')
+  }
+  if (reliability.reliabilityScore < 55) {
+    return reject(`Reliability too low (${reliability.reliabilityScore}/100)`, 'low_reliability')
+  }
+  if (reliability.currentLosingStreak >= 4) {
+    return reject(`Current losing streak (${reliability.currentLosingStreak})`, 'severe_losing_streak')
+  }
+  if (reliability.worstLosingStreak >= 10) {
+    return reject(`Worst losing streak (${reliability.worstLosingStreak})`, 'severe_losing_streak')
+  }
+
+  if (recentTrades < 10 && historicalTrades < 20) {
+    return reject('Insufficient history (need 10+ recent or 20+ historical trades)', 'too_little_history')
+  }
+  if (marketsTraded < 3) {
+    return reject(`Need 3+ unique markets (has ${marketsTraded})`, 'weak_sample')
+  }
+  if (realizedPnl !== null && realizedPnl < -50) {
+    return reject(`Realized PnL too negative (${formatUSD(realizedPnl)})`, 'negative_pnl')
+  }
+  if (reliability.hardFailReasons.includes('Ignored: one big win risk')) {
+    return reject('One lucky trade concentration risk', 'concentration_risk')
+  }
+
+  const noSevereFlags =
     reliability.currentLosingStreak < 4 &&
-    reliability.worstLosingStreak < 12
-  const noLuckyWinPattern =
-    reliability.profitFactor === null ||
-    reliability.profitFactor >= 0.55 ||
-    reliability.winRate === null ||
-    reliability.winRate >= 0.35
+    reliability.worstLosingStreak < 10 &&
+    (realizedPnl === null || realizedPnl >= -50)
 
-  if (!noSeverePnL || !noTerribleWinRate || !acceptableStreak || !noLuckyWinPattern) return false
+  const hasPromisingSignal =
+    (realizedPnl !== null && realizedPnl >= 500) ||
+    (profitFactor !== null && profitFactor >= 1.25 && reliability.resolvedPositions >= 20) ||
+    (reliability.winRate !== null && reliability.winRate >= 0.55 && reliability.resolvedPositions >= 20) ||
+    (timingEdgePct !== null && timingEdgePct >= 58 && livePricedTrades >= 20) ||
+    (agg.volume >= 5000 && noSevereFlags && (realizedPnl === null || realizedPnl >= 0))
 
-  const strongScanActivity =
-    agg.trades.length >= 2 &&
-    agg.markets.size >= 2 &&
-    agg.volume >= 40
-  const goodTiming =
-    timingEdgePct !== null &&
-    timingEdgePct >= 52 &&
-    agg.trades.length >= 2
-  const moderateReliability =
-    reliability.reliabilityScore >= 42 &&
-    reliability.sampleSize >= 5
-  const positiveHistory =
-    reliability.realizedPnl !== null &&
-    reliability.realizedPnl >= 0 &&
-    reliability.currentLosingStreak < 3
+  if (!hasPromisingSignal) {
+    return reject('No promising performance signal met', 'no_promising_signal')
+  }
 
-  return strongScanActivity && (goodTiming || moderateReliability || positiveHistory)
+  return { eligible: true, rejectionReason: '', rejectionCategory: null }
+}
+
+function buildRejectionBreakdown(entries: HotTraderEntry[]): Record<string, number> {
+  const breakdown: Record<string, number> = {}
+  for (const entry of entries) {
+    if (!entry.rejectionReason) continue
+    const category = categorizeRejectionReason(entry.rejectionReason)
+    breakdown[category] = (breakdown[category] ?? 0) + 1
+  }
+  return breakdown
+}
+
+function categorizeRejectionReason(reason: string): string {
+  const lower = reason.toLowerCase()
+  if (lower.includes('win rate')) return 'poor_win_rate'
+  if (lower.includes('pnl') || lower.includes('profit factor')) return 'negative_pnl'
+  if (lower.includes('streak')) return 'severe_losing_streak'
+  if (lower.includes('reliability')) return 'low_reliability'
+  if (lower.includes('history') || lower.includes('closed position')) return 'too_little_history'
+  if (lower.includes('recent trade') || lower.includes('market')) return 'weak_sample'
+  if (lower.includes('concentration') || lower.includes('lucky')) return 'concentration_risk'
+  if (lower.includes('promising') || lower.includes('signal')) return 'no_promising_signal'
+  if (lower.startsWith('ignored:')) return 'hard_fail'
+  return 'other'
+}
+
+function buildNearMisses(ignored: HotTraderEntry[], limit = 5): NearMissEntry[] {
+  return [...ignored]
+    .filter(entry => entry.rejectionReason)
+    .sort((a, b) => b.reliabilityScore - a.reliabilityScore)
+    .slice(0, limit)
+    .map(entry => ({
+      address: entry.address,
+      label: entry.label,
+      reliabilityScore: entry.reliabilityScore,
+      winRate: entry.winRate,
+      realizedPnl: entry.realizedPnl,
+      tradeCount: Math.max(entry.recentTradeCount, entry.historicalTradeCount),
+      rejectionReason: entry.rejectionReason ?? 'Did not meet watchlist gates',
+    }))
 }
 
 function applyDiscoveryTier(
   entry: HotTraderEntry,
   agg: HotWalletAgg,
   reliability: TraderReliability,
+  marketsTraded: number,
 ): HotTraderEntry {
   if (reliability.isReliableCandidate) {
     return {
@@ -586,23 +696,14 @@ function applyDiscoveryTier(
     }
   }
 
-  if (reliability.hardFailReasons.length > 0) {
-    return {
-      ...entry,
-      candidateTier: 'ignored',
-      copySignal: 'IGNORE',
-      isReliableCandidate: false,
-    }
-  }
+  const watchEval = evaluateWatchlistCandidate(agg, reliability, entry.timingEdge, marketsTraded)
 
-  if (assessDiscoveryWatchEligibility(agg, reliability, entry.timingEdge)) {
+  if (watchEval.eligible) {
     return {
       ...entry,
       candidateTier: 'watch',
       copySignal: 'WATCH',
-      reliabilityLabel: reliability.reliabilityLabel === 'Active but unreliable'
-        ? 'Watch candidate'
-        : reliability.reliabilityLabel,
+      reliabilityLabel: 'Watch candidate',
       isReliableCandidate: false,
     }
   }
@@ -612,6 +713,7 @@ function applyDiscoveryTier(
     candidateTier: 'ignored',
     copySignal: 'IGNORE',
     isReliableCandidate: false,
+    rejectionReason: watchEval.rejectionReason || reliability.hardFailReasons[0] || 'Did not meet watchlist gates',
   }
 }
 
@@ -646,6 +748,27 @@ function buildEmptyReasons(
   const reasons: string[] = []
   if (summary.reliableCandidates > 0 || summary.watchCandidates > 0) return reasons
 
+  const breakdown = summary.rejectionBreakdown
+  const breakdownLabels: Record<string, string> = {
+    too_little_history: 'too little history',
+    negative_pnl: 'negative PnL',
+    poor_win_rate: 'poor win rate',
+    severe_losing_streak: 'severe losing streak',
+    weak_sample: 'weak sample size',
+    low_reliability: 'low reliability score',
+    no_promising_signal: 'no promising performance signal',
+    concentration_risk: 'concentration risk',
+    hard_fail: 'hard reliability failure',
+    other: 'other gate failures',
+  }
+
+  for (const [key, count] of Object.entries(breakdown)) {
+    if (count > 0) {
+      const label = breakdownLabels[key] ?? key
+      reasons.push(`${count} wallet${count === 1 ? '' : 's'} failed: ${label}`)
+    }
+  }
+
   if (summary.scannedTrades < 300) {
     reasons.push('Trade sample was small — try refreshing for a deeper scan.')
   }
@@ -655,17 +778,11 @@ function buildEmptyReasons(
   if (diagnostics.discardedReasons.below_volume_floor) {
     reasons.push('Many trades were below the minimum size filter.')
   }
-  const gateFailures = diagnostics.ignoredActiveTraders
-  if (gateFailures > 0 && summary.enrichedWallets > 0) {
-    reasons.push(
-      `${gateFailures} active wallet${gateFailures === 1 ? '' : 's'} failed reliability gates (win rate, PnL, or losing streak).`,
-    )
-  }
   if (summary.enrichedWallets === 0 && summary.scannedWallets > 0) {
     reasons.push('No wallets were enriched with position data.')
   }
   if (reasons.length === 0) {
-    reasons.push('No wallets met copy-ready or watchlist criteria in this scan — the market may simply lack strong candidates right now.')
+    reasons.push('No wallets met copy-ready or watchlist criteria — the market may lack strong candidates right now.')
   }
   return reasons
 }
@@ -803,6 +920,7 @@ function makeHotEntry(agg: HotWalletAgg, winRate: number | null, pnl: number | n
     reliabilityReasons: [],
     scoreReasons: [],
     isReliableCandidate: false,
+    historicalTradeCount: 0,
   }
   entry.scoreReasons = buildHotReasons(entry)
   return entry
@@ -1021,6 +1139,9 @@ async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = M
             ? activity.filter(t => t.type === 'TRADE' && (t.usdcSize ?? 0) >= 1)
             : agg.trades
 
+        const historicalMarkets = new Set(tradesForAnalysis.map(t => t.conditionId).filter(Boolean)).size
+        const marketsTraded = Math.max(agg.markets.size, historicalMarkets)
+
         const assets = [...new Set([
           ...tradesForAnalysis.map(t => t.asset),
           ...agg.trades.map(t => t.asset),
@@ -1048,6 +1169,8 @@ async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = M
         const reliability = analyzeTraderReliability(tradesForAnalysis, positions, priceMap)
         const merged = {
           ...entry,
+          marketsTraded,
+          historicalTradeCount: reliability.sampleSize,
           reliabilityScore: reliability.reliabilityScore,
           copySignal: reliability.copySignal,
           confidence: reliability.confidence,
@@ -1064,7 +1187,7 @@ async function enrichTraderReliability(aggregates: HotWalletAgg[], maxEnrich = M
           isReliableCandidate: reliability.isReliableCandidate,
           candidateTier: reliability.candidateTier,
         }
-        return applyDiscoveryTier(merged, agg, reliability)
+        return applyDiscoveryTier(merged, agg, reliability, marketsTraded)
       } catch {
         return makeHotEntry(agg, null, null)
       }
@@ -1247,7 +1370,7 @@ function sortHotTraderEntries(entries: HotTraderEntry[]): HotTraderEntry[] {
 }
 
 export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryResult> {
-  const key = `copy-discovery:v3:${limit}`
+  const key = `copy-discovery:v4:${limit}`
   const cached = cacheGet<CopyDiscoveryResult>(key, TTL.discovery)
   if (cached !== null) return cached
 
@@ -1358,13 +1481,15 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
         scanSource: describeScanSource(globalSample.normalized.length, marketSample.normalized.length, diagnostics.marketPoolsScanned),
         apiNote,
         emptyReasons: ['No wallets appeared in the trade sample.'],
+        rejectionBreakdown: {},
       }
       const result: CopyDiscoveryResult = {
         state: 'empty',
-        message: 'No candidate wallets found in the current scan.',
+        message: 'No strong copy candidates found in this scan.',
         reliable: [],
         watchlist: [],
         ignored: [],
+        nearMisses: [],
         summary,
         diagnostics,
       }
@@ -1375,7 +1500,8 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
     const reliableSorted = sortHotTraderEntries(reliable).slice(0, limit)
     const watchSorted = sortHotTraderEntries(watchlist).slice(0, limit)
     const ignoredSortedAll = sortHotTraderEntries(ignored)
-    const ignoredSorted = ignoredSortedAll.slice(0, 8)
+    const nearMisses = buildNearMisses(ignoredSortedAll, 5)
+    const rejectionBreakdown = buildRejectionBreakdown(ignoredSortedAll)
 
     diagnostics.reliableCandidates = reliableSorted.length
     diagnostics.watchCandidates = watchSorted.length
@@ -1406,6 +1532,7 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
       scanSource: describeScanSource(globalTradeCount, marketTradeCount, diagnostics.marketPoolsScanned),
       apiNote,
       emptyReasons: [],
+      rejectionBreakdown,
     }
     summary.emptyReasons = buildEmptyReasons(summary, diagnostics)
 
@@ -1414,11 +1541,12 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
       message: hasReliable
         ? 'Copy-ready wallets found.'
         : hasWatch
-          ? 'No copy-ready wallets found in this scan. Showing watchlist candidates if available.'
-          : 'No copy-ready or watchlist candidates found in this scan.',
+          ? 'Watchlist candidates found — promising but not copy-ready yet.'
+          : 'No strong copy candidates found in this scan.',
       reliable: reliableSorted,
       watchlist: watchSorted,
-      ignored: ignoredSorted,
+      ignored: [],
+      nearMisses,
       summary,
       diagnostics,
     }
@@ -1437,6 +1565,7 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
       scanSource: 'unknown',
       apiNote: null,
       emptyReasons: ['Scan failed before completion.'],
+      rejectionBreakdown: {},
     }
     const result: CopyDiscoveryResult = {
       state: 'error',
@@ -1444,6 +1573,7 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
       reliable: [],
       watchlist: [],
       ignored: [],
+      nearMisses: [],
       summary,
       diagnostics,
     }

@@ -483,6 +483,44 @@
   border-color: var(--accent);
   color: var(--accent);
 }
+.near-miss-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.near-miss-row {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.02);
+}
+.near-miss-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+.near-miss-wallet {
+  border: none;
+  background: none;
+  padding: 0;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+.near-miss-wallet:hover {
+  text-decoration: underline;
+}
+.near-miss-stat {
+  font-size: 0.78rem;
+  color: var(--text-h);
+}
+.near-miss-reason {
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-h);
+}
 
 /* ── Timing bar ── */
 .timing-bar-wrap { margin-bottom: 8px; }

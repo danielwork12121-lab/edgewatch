@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { discoverCopyCandidates, type CopyDiscoveryResult, type HotTraderEntry } from '../api/traders'
+import { discoverCopyCandidates, type CopyDiscoveryResult, type HotTraderEntry, type NearMissEntry } from '../api/traders'
 import { formatUSD } from '../api/polymarket'
 import { truncateAddress } from '../api/wallets'
 import { cacheInvalidate, cacheTime, formatAge } from '../api/cache'
@@ -8,7 +8,20 @@ interface Props {
   onSelectWallet: (address: string) => void
 }
 
-const CACHE_KEY = 'copy-discovery:v3:8'
+const CACHE_KEY = 'copy-discovery:v4:8'
+
+const REJECTION_LABELS: Record<string, string> = {
+  too_little_history: 'too little history',
+  negative_pnl: 'negative PnL',
+  poor_win_rate: 'poor win rate',
+  severe_losing_streak: 'severe losing streak',
+  weak_sample: 'weak sample',
+  low_reliability: 'low reliability',
+  no_promising_signal: 'no promising signal',
+  concentration_risk: 'concentration risk',
+  hard_fail: 'hard failure',
+  other: 'other',
+}
 
 const devLog = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.debug('[EdgeWatch][copy-discovery]', ...args)
@@ -18,7 +31,7 @@ function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onS
   const label =
     trader.candidateTier === 'reliable' ? 'Copy-ready' :
     trader.candidateTier === 'watch' ? 'Worth watching' :
-    'Ignored active trader'
+    'Rejected'
   const badge =
     trader.candidateTier === 'reliable' ? 'badge-green' :
     trader.candidateTier === 'watch' ? 'badge-yellow' : 'badge-red'
@@ -36,7 +49,7 @@ function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onS
             <span className={`confidence-badge ${trader.copySignal === 'COPY' ? 'badge-green' : trader.copySignal === 'WATCH' ? 'badge-yellow' : 'badge-red'}`}>
               {trader.copySignal}
             </span>
-            <span className={`confidence-badge ${trader.reliabilityScore >= 75 ? 'badge-green' : trader.reliabilityScore >= 50 ? 'badge-yellow' : 'badge-orange'}`}>
+            <span className={`confidence-badge ${trader.reliabilityScore >= 75 ? 'badge-green' : trader.reliabilityScore >= 55 ? 'badge-yellow' : 'badge-orange'}`}>
               Reliability {Math.round(trader.reliabilityScore)}/100
             </span>
           </div>
@@ -44,7 +57,7 @@ function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onS
 
         <div className="trader-card-meta">
           <span className="stat date">{trader.reliabilityLabel}</span>
-          <span className="stat date">{trader.recentTradeCount} trades</span>
+          <span className="stat date">{trader.recentTradeCount} recent trades</span>
           <span className="stat date">{trader.marketsTraded} markets</span>
           <span className="stat date">Streak {trader.currentLosingStreak > 0 ? `Losing ${trader.currentLosingStreak}` : 'Even'}</span>
           <span className="stat date">Worst loss streak {trader.worstLosingStreak}</span>
@@ -86,12 +99,31 @@ function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onS
   )
 }
 
+function NearMissRow({ entry, onSelectWallet }: { entry: NearMissEntry; onSelectWallet: (address: string) => void }) {
+  return (
+    <div className="near-miss-row">
+      <div className="near-miss-main">
+        <button type="button" className="near-miss-wallet" onClick={() => onSelectWallet(entry.address)}>
+          {entry.label || truncateAddress(entry.address)}
+        </button>
+        <span className="near-miss-stat">Reliability {entry.reliabilityScore}/100</span>
+        <span className="near-miss-stat">
+          {entry.winRate !== null ? `${(entry.winRate * 100).toFixed(0)}% win rate` : 'Win rate n/a'}
+        </span>
+        <span className="near-miss-stat">
+          {entry.realizedPnl !== null ? `${entry.realizedPnl >= 0 ? '+' : ''}${formatUSD(entry.realizedPnl)} PnL` : 'PnL n/a'}
+        </span>
+        <span className="near-miss-stat">{entry.tradeCount} trades</span>
+      </div>
+      <p className="near-miss-reason">Rejected: {entry.rejectionReason}</p>
+    </div>
+  )
+}
+
 function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
   const { summary } = result
-  const showEmptyReasons =
-    summary.reliableCandidates === 0 &&
-    summary.watchCandidates === 0 &&
-    summary.emptyReasons.length > 0
+  const noCandidates = summary.reliableCandidates === 0 && summary.watchCandidates === 0
+  const breakdownEntries = Object.entries(summary.rejectionBreakdown).filter(([, count]) => count > 0)
 
   return (
     <div className="scan-summary-panel">
@@ -101,12 +133,8 @@ function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
           <span className="scan-summary-label">trades scanned</span>
         </div>
         <div className="scan-summary-stat">
-          <span className="scan-summary-value">{summary.uniqueTrades.toLocaleString()}</span>
-          <span className="scan-summary-label">unique after dedup</span>
-        </div>
-        <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.scannedWallets}</span>
-          <span className="scan-summary-label">wallets found</span>
+          <span className="scan-summary-label">wallets checked</span>
         </div>
         <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.enrichedWallets}</span>
@@ -122,16 +150,28 @@ function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
         </div>
         <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.ignoredActiveTraders}</span>
-          <span className="scan-summary-label">ignored</span>
+          <span className="scan-summary-label">rejected</span>
         </div>
       </div>
       <p className="scan-summary-source">
         Source: {summary.scanSource}
         {summary.apiNote ? ` · ${summary.apiNote}` : ''}
       </p>
-      {showEmptyReasons && (
+      {noCandidates && breakdownEntries.length > 0 && (
         <div className="scan-summary-empty">
-          <strong>Why no candidates?</strong>
+          <strong>Rejection breakdown</strong>
+          <ul>
+            {breakdownEntries.map(([key, count]) => (
+              <li key={key}>
+                {count} failed: {REJECTION_LABELS[key] ?? key}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {noCandidates && summary.emptyReasons.length > 0 && (
+        <div className="scan-summary-empty">
+          <strong>Scan notes</strong>
           <ul>
             {summary.emptyReasons.map((reason, index) => (
               <li key={index}>{reason}</li>
@@ -148,7 +188,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
-  const [showIgnored, setShowIgnored] = useState(false)
+  const [showNearMisses, setShowNearMisses] = useState(false)
 
   const load = useCallback((forceRefresh = false) => {
     setLoading(true)
@@ -162,7 +202,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
           state: next.state,
           message: next.message,
           summary: next.summary,
-          titles: [...next.reliable, ...next.watchlist].slice(0, 5).map(trader => trader.label),
+          nearMisses: next.nearMisses.length,
         })
         if (next.state === 'error') setError('Could not scan candidate wallets')
       })
@@ -178,8 +218,9 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
   }, [load])
 
   const showReliable = (result?.reliable ?? []).length > 0
-  const showWatch = !showReliable && (result?.watchlist ?? []).length > 0
-  const ignoredCount = result?.summary.ignoredActiveTraders ?? 0
+  const showWatch = (result?.watchlist ?? []).length > 0
+  const noStrongCandidates = !showReliable && !showWatch
+  const nearMisses = result?.nearMisses ?? []
 
   return (
     <section className="homepage-section hot-traders-section">
@@ -187,7 +228,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
         <div>
           <h2 className="section-title">Copy Candidate Discovery</h2>
           <p className="section-subtitle">
-            Broad scan of recent trades, active markets, and wallet history. Copy-ready wallets stay separate from watch-only and ignored traders.
+            Broad scan of recent trades, active markets, and wallet history. Only genuinely promising wallets surface as candidates.
           </p>
         </div>
         <div className="refresh-bar">
@@ -203,7 +244,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
 
       {result && !loading && <ScanSummaryPanel result={result} />}
 
-      {!loading && !error && result && result.message && (
+      {!loading && !error && result && result.message && showReliable && (
         <p className="score-disclaimer" style={{ marginBottom: 12 }}>
           {result.message}
         </p>
@@ -227,6 +268,11 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
           <div className="section-heading" style={{ marginBottom: 12 }}>
             <h3 className="markets-list-title">Watchlist Candidates ({result?.watchlist.length ?? 0})</h3>
           </div>
+          {!showReliable && (
+            <p className="score-disclaimer" style={{ marginBottom: 12 }}>
+              No copy-ready wallets found in this scan. Showing watchlist candidates below.
+            </p>
+          )}
           <div className="trader-list">
             {result?.watchlist.map(trader => (
               <CandidateCard key={trader.address} trader={trader} onSelectWallet={onSelectWallet} />
@@ -235,25 +281,28 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
         </div>
       )}
 
-      {!loading && !showReliable && !showWatch && result && result.state !== 'error' && (
+      {!loading && noStrongCandidates && result && result.state !== 'error' && (
         <p className="empty-msg">
-          No copy-ready or watchlist candidates found in this scan.
+          No strong copy candidates found in this scan.
         </p>
       )}
 
-      {!loading && ignoredCount > 0 && (
+      {!loading && nearMisses.length > 0 && (
         <div className="ignored-traders-block">
           <button
             type="button"
             className="ignored-toggle"
-            onClick={() => setShowIgnored(v => !v)}
+            onClick={() => setShowNearMisses(v => !v)}
           >
-            {showIgnored ? 'Hide ignored active traders' : `Show ignored active traders (${ignoredCount})`}
+            {showNearMisses ? 'Hide why no candidates?' : `Why no candidates? (${nearMisses.length} near misses)`}
           </button>
-          {showIgnored && (
-            <div className="trader-list" style={{ marginTop: 12 }}>
-              {result?.ignored.map(trader => (
-                <CandidateCard key={trader.address} trader={trader} onSelectWallet={onSelectWallet} />
+          {showNearMisses && (
+            <div className="near-miss-list" style={{ marginTop: 12 }}>
+              <p className="score-disclaimer" style={{ marginBottom: 10 }}>
+                These wallets were closest to passing but were rejected — not recommended.
+              </p>
+              {nearMisses.map(entry => (
+                <NearMissRow key={entry.address} entry={entry} onSelectWallet={onSelectWallet} />
               ))}
             </div>
           )}
