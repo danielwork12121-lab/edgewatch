@@ -375,50 +375,28 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
 
       {!loading && !error && (
         <>
-          <section className="wallet-section">
-            <div className="section-header">
-              <h3 className="markets-list-title">Current Open Positions ({activePositions.length})</h3>
-              <span className="estimate-label">Active bets held right now</span>
+          <div className="wallet-quality-banner">
+            <div className="data-source-label" style={{ marginBottom: traderQuality.plainReasons.length > 0 ? 8 : 0 }}>
+              <strong>
+                {traderQuality.tier === 'reliable' ? 'Reliable candidate' :
+                  traderQuality.tier === 'watch' ? 'Strong watch candidate' :
+                  traderQuality.tier === 'emerging' ? 'Emerging trader' :
+                  traderQuality.rejectionReason || reliability?.reliabilityLabel}
+              </strong>
+              {' · '}
+              Quality {traderQuality.qualityScore}/100
+              {traderQuality.luckyWinRisk ? ' · Lucky win risk flagged' : ''}
+              {traderQuality.outlierDriven ? ' · Outlier-driven profit' : ''}
             </div>
-            {activePositions.length === 0 && !positionsError && (
-              <p className="empty-msg">No current open positions found from public API.</p>
-            )}
-            {activePositions.length > 0 && (
-              <>
-                {(reliability?.realizedPnl ?? 0) < 0 && openValue > Math.abs(reliability?.realizedPnl ?? 0) * 2 && (
-                  <p className="score-disclaimer" style={{ marginBottom: 10 }}>
-                    Large exposure with poor realized history.
-                  </p>
-                )}
-                {activePositions.slice(0, 12).map(position => (
-                  <CurrentPositionRow
-                    key={position.asset}
-                    position={position}
-                    copyRiskLabel={positionFollowLabel(position)}
-                  />
+            {traderQuality.plainReasons.length > 0 && (
+              <ul className="hot-trader-reasons" style={{ margin: 0 }}>
+                {traderQuality.plainReasons.slice(0, 4).map((reason, index) => (
+                  <li key={index}>{reason}</li>
                 ))}
-                {activePositions.length > 12 && (
-                  <p className="empty-msg">Showing first 12 active positions.</p>
-                )}
-              </>
+              </ul>
             )}
-          </section>
-
-          {/* ── Copy Trading Module — top of page ── */}
-          <CopyTradingModule
-            score={score}
-            trades={filtered}
-            winRate={winRate}
-            reliability={reliability}
-            onViewPortfolio={onViewPortfolio}
-            onFollowMsg={msg => { setFollowMsg(msg); setTimeout(() => setFollowMsg(null), 4000) }}
-          />
-
-          <div className="data-source-label">
-            Polymarket public API · {filtered.length} trades · {positionsWithValue.length} positions
           </div>
 
-          {/* ── Stats row ── */}
           <div className="wallet-stats-row">
             <div className="wallet-stat">
               <span className="wallet-stat-val">{filtered.length}</span>
@@ -446,41 +424,24 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               </span>
               <span className="wallet-stat-label">Realized PnL</span>
             </div>
-          <div className="wallet-stat">
-            <span className={`wallet-stat-val ${openValue >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
-              {formatUSD(openValue)}
-            </span>
-            <span className="wallet-stat-label">Open Value (unresolved exposure)</span>
-          </div>
-          </div>
-
-          <p className="score-disclaimer" style={{ marginTop: -4, marginBottom: 12 }}>
-            Win Rate = percentage of closed positions that ended profitable. Realized PnL = profit/loss from closed positions.
-            Open Value = current value of unresolved/open positions, not profit. Entry Edge = estimated price movement after entry.
-            Live-priced trades = trades where current CLOB price was available.
-          </p>
-
-          <div className="data-source-label" style={{ marginBottom: 16 }}>
-            <strong>{traderQuality.tier === 'reliable' ? 'Reliable candidate' : traderQuality.tier === 'watch' ? 'Strong watch candidate' : traderQuality.tier === 'emerging' ? 'Emerging trader' : traderQuality.rejectionReason || reliability?.reliabilityLabel}</strong>
-            {' · '}
-            Quality {traderQuality.qualityScore}/100
-            {' · '}
-            {traderQuality.backtest.label}
-            {traderQuality.luckyWinRisk ? ' · Lucky win risk flagged' : ''}
-            {traderQuality.outlierDriven ? ' · Outlier-driven profit' : ''}
+            <div className="wallet-stat">
+              <span className={`wallet-stat-val ${openValue >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
+                {formatUSD(openValue)}
+              </span>
+              <span className="wallet-stat-label">Open exposure</span>
+            </div>
           </div>
 
-          {traderQuality.plainReasons.length > 0 && (
-            <ul className="hot-trader-reasons" style={{ marginBottom: 16 }}>
-              {traderQuality.plainReasons.map((reason, index) => (
-                <li key={index}>{reason}</li>
-              ))}
-            </ul>
+          {positionsWithValue.length > 0 ? (
+            <section className="wallet-section wallet-section-highlight">
+              <PnLGraph positions={positionsWithValue} />
+            </section>
+          ) : (
+            <p className="empty-msg">No closed position history available for performance graph.</p>
           )}
 
-          {/* ── Tabs ── */}
           <div className="tab-bar">
-            <button className={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
+            <button type="button" className={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
               Performance
             </button>
             <button type="button" className={`tab-btn ${tab === 'trades' ? 'active' : ''}`} onClick={() => setTab('trades')}>
@@ -491,7 +452,6 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             </button>
           </div>
 
-          {/* ── Performance tab: EdgeScore + PnL graph + positions ── */}
           {tab === 'overview' && (
             <>
               {(score || scoreLoading) && (
@@ -506,17 +466,17 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
                 />
               )}
 
-              {positionsWithValue.length > 0 && (
-                <section className="wallet-section">
-                  <h3 className="markets-list-title">PnL History ({positionsWithValue.length} positions)</h3>
-                  <PnLGraph positions={positionsWithValue} />
-                </section>
-              )}
-
+              <CopyTradingModule
+                score={score}
+                trades={filtered}
+                winRate={winRate}
+                reliability={reliability}
+                onViewPortfolio={onViewPortfolio}
+                onFollowMsg={msg => { setFollowMsg(msg); setTimeout(() => setFollowMsg(null), 4000) }}
+              />
             </>
           )}
 
-          {/* ── Trade History tab ── */}
           {tab === 'trades' && (
             <section className="wallet-section">
               <div className="section-header">
@@ -552,7 +512,6 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             </section>
           )}
 
-          {/* ── Entry Charts tab: lazy-loaded per market ── */}
           {tab === 'charts' && (
             <section className="wallet-section">
               <p className="score-disclaimer" style={{ marginBottom: 12 }}>
@@ -584,6 +543,39 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               })()}
             </section>
           )}
+
+          <section className="wallet-section">
+            <div className="section-header">
+              <h3 className="markets-list-title">Current Open Positions ({activePositions.length})</h3>
+              <span className="estimate-label">Active bets held right now</span>
+            </div>
+            {activePositions.length === 0 && !positionsError && (
+              <p className="empty-msg">No current open positions found from public API.</p>
+            )}
+            {activePositions.length > 0 && (
+              <>
+                {(reliability?.realizedPnl ?? 0) < 0 && openValue > Math.abs(reliability?.realizedPnl ?? 0) * 2 && (
+                  <p className="score-disclaimer" style={{ marginBottom: 10 }}>
+                    Large exposure with poor realized history.
+                  </p>
+                )}
+                {activePositions.slice(0, 12).map(position => (
+                  <CurrentPositionRow
+                    key={position.asset}
+                    position={position}
+                    copyRiskLabel={positionFollowLabel(position)}
+                  />
+                ))}
+                {activePositions.length > 12 && (
+                  <p className="empty-msg">Showing first 12 active positions.</p>
+                )}
+              </>
+            )}
+          </section>
+
+          <div className="data-source-label">
+            Polymarket public API · {filtered.length} trades · {positionsWithValue.length} positions
+          </div>
         </>
       )}
     </div>
