@@ -133,6 +133,43 @@ function TradeRow({
   )
 }
 
+function CurrentPositionRow({
+  position,
+  copyRiskLabel,
+}: {
+  position: WalletPosition
+  copyRiskLabel: string
+}) {
+  const shares = toFiniteNumber(position.size, 0)
+  const entry = formatPercent(position.avgPrice, 1).replace('%', '¢')
+  const current = position.curPrice !== undefined ? formatPercent(position.curPrice, 1).replace('%', '¢') : '—'
+  const value = formatUSD(position.currentValue ?? 0)
+  const pnl = toFiniteNumber(position.cashPnl ?? position.realizedPnl, 0)
+  const pnlPos = pnl >= 0
+  const label = position.redeemable ? 'Open position' : 'Active bet'
+
+  return (
+    <div className="position-row">
+      <div className="position-top">
+        <span className="trade-title">{position.title}</span>
+        <span className={`pnl-badge ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>
+          {pnlPos ? '+' : ''}{formatUSD(pnl)}
+        </span>
+      </div>
+      <div className="trade-row-meta">
+        <span className="trade-outcome">{position.outcome}</span>
+        <span className="stat vol">{shares.toFixed(0)} shares</span>
+        <span className="stat prob">Entry {entry}</span>
+        <span className="stat prob">Current {current}</span>
+        <span className="stat vol">Value {value}</span>
+        <span className="stat date">Closes {formatDate(position.endDate)}</span>
+        <span className="stat date">{label}</span>
+        <span className={`stat date ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>{copyRiskLabel}</span>
+      </div>
+    </div>
+  )
+}
+
 export default function WalletProfile({ address, onBack, onViewPortfolio }: Props) {
   const [trades, setTrades] = useState<WalletTrade[]>([])
   const [positions, setPositions] = useState<WalletPosition[]>([])
@@ -146,6 +183,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [scoreLoading, setScoreLoading] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
   const [livePrices, setLivePrices] = useState<Map<string, number>>(new Map())
+  const [positionsError, setPositionsError] = useState<string | null>(null)
 
   const actKey = `wallet:${address}:activity`
   const posKey = `wallet:${address}:positions`
@@ -157,6 +195,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
       if (cachedAct !== null && cachedPos !== null) {
         setTrades(cachedAct)
         setPositions(cachedPos)
+        setPositionsError(null)
         setLastUpdated(Math.min(cacheTime(actKey) ?? Date.now(), cacheTime(posKey) ?? Date.now()))
         setLoading(false)
         return
@@ -164,18 +203,29 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
     }
     setLoading(true)
     setError(null)
-    Promise.all([
+    setPositionsError(null)
+    Promise.allSettled([
       getWalletActivity(address, 200),
       getWalletPositions(address, 100),
     ])
-      .then(([acts, pos]) => {
-        cacheSet(actKey, acts)
-        cacheSet(posKey, pos)
-        setTrades(acts)
-        setPositions(pos)
+      .then(([actsResult, posResult]) => {
+        if (actsResult.status === 'fulfilled') {
+          cacheSet(actKey, actsResult.value)
+          setTrades(actsResult.value)
+        } else {
+          setError('Wallet activity unavailable from public API.')
+        }
+
+        if (posResult.status === 'fulfilled') {
+          cacheSet(posKey, posResult.value)
+          setPositions(posResult.value)
+          setPositionsError(null)
+        } else {
+          setPositions([])
+          setPositionsError('Current positions unavailable from public API.')
+        }
         setLastUpdated(Date.now())
       })
-      .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }, [address, actKey, posKey])
 
@@ -261,6 +311,11 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const openValue = positions.reduce((s, p) => s + (p.currentValue ?? 0), 0)
   const wins = positionsWithValue.filter(p => (p.cashPnl ?? 0) >= 0).length
   const winRate = positionsWithValue.length > 0 ? wins / positionsWithValue.length : null
+  const activePositions = positions.filter(p => (p.initialValue ?? 0) > 0 || (p.currentValue ?? 0) > 0 || p.redeemable === false)
+  const copyRiskLabel =
+    reliability?.copySignal === 'COPY' ? 'Copy risk: low' :
+    reliability?.copySignal === 'WATCH' ? 'Copy risk: watch only' :
+    'Copy risk: do not copy yet'
 
   return (
     <div className="detail-page">
@@ -301,9 +356,39 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
 
       {loading && <p className="empty-msg">Loading wallet data…</p>}
       {error && <p className="error-msg">{error}</p>}
+      {positionsError && <p className="error-msg">{positionsError}</p>}
 
       {!loading && !error && (
         <>
+          <section className="wallet-section">
+            <div className="section-header">
+              <h3 className="markets-list-title">Current Open Positions ({activePositions.length})</h3>
+              <span className="estimate-label">Active bets held right now</span>
+            </div>
+            {activePositions.length === 0 && !positionsError && (
+              <p className="empty-msg">No current open positions found from public API.</p>
+            )}
+            {activePositions.length > 0 && (
+              <>
+                {(reliability?.realizedPnl ?? 0) < 0 && openValue > Math.abs(reliability?.realizedPnl ?? 0) * 2 && (
+                  <p className="score-disclaimer" style={{ marginBottom: 10 }}>
+                    Large exposure with poor realized history.
+                  </p>
+                )}
+                {activePositions.slice(0, 12).map(position => (
+                  <CurrentPositionRow
+                    key={position.asset}
+                    position={position}
+                    copyRiskLabel={copyRiskLabel}
+                  />
+                ))}
+                {activePositions.length > 12 && (
+                  <p className="empty-msg">Showing first 12 active positions.</p>
+                )}
+              </>
+            )}
+          </section>
+
           {/* ── Copy Trading Module — top of page ── */}
           <CopyTradingModule
             score={score}
@@ -346,13 +431,19 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               </span>
               <span className="wallet-stat-label">Realized PnL</span>
             </div>
-            <div className="wallet-stat">
-              <span className={`wallet-stat-val ${openValue >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
-                {formatUSD(openValue)}
-              </span>
-              <span className="wallet-stat-label">Open Value</span>
-            </div>
+          <div className="wallet-stat">
+            <span className={`wallet-stat-val ${openValue >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
+              {formatUSD(openValue)}
+            </span>
+            <span className="wallet-stat-label">Open Value (unresolved exposure)</span>
           </div>
+          </div>
+
+          <p className="score-disclaimer" style={{ marginTop: -4, marginBottom: 12 }}>
+            Win Rate = percentage of closed positions that ended profitable. Realized PnL = profit/loss from closed positions.
+            Open Value = current value of unresolved/open positions, not profit. Entry Edge = estimated price movement after entry.
+            Live-priced trades = trades where current CLOB price was available.
+          </p>
 
           <div className="data-source-label" style={{ marginBottom: 16 }}>
             <strong>{reliability?.reliabilityLabel ?? 'Active but unreliable'}</strong>
@@ -399,26 +490,6 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
                 </section>
               )}
 
-              {positions.length > 0 && (
-                <section className="wallet-section">
-                  <h3 className="markets-list-title">Open Positions ({positions.length})</h3>
-                  {positions.map(pos => (
-                    <div key={pos.asset} className="position-row">
-                      <div className="position-top">
-                        <span className="trade-title">{pos.title}</span>
-                        <span className={`pnl-badge ${(pos.cashPnl ?? 0) >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
-                          {(pos.cashPnl ?? 0) >= 0 ? '+' : ''}{formatUSD(pos.cashPnl ?? 0)}
-                        </span>
-                      </div>
-                      <div className="trade-row-meta">
-                        <span className="trade-outcome">{pos.outcome}</span>
-                        <span className="stat vol">{toFiniteNumber(pos.size, 0).toFixed(0)} shares @ {formatPercent(pos.avgPrice, 0).replace('%', '¢')}</span>
-                        <span className="stat date">Closes {formatDate(pos.endDate)}</span>
-                      </div>
-                    </div>
-                  ))}
-                </section>
-              )}
             </>
           )}
 

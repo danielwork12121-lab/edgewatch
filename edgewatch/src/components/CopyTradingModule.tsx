@@ -22,20 +22,18 @@ interface Recommendation {
 
 function computeRecommendation(score: EdgeScore, winRate: number | null, reliability: TraderReliability | null): Recommendation {
   const reliabilityScore = reliability?.reliabilityScore ?? 0
-  const confWeight = { high: 1.0, medium: 0.7, low: 0.4, very_low: 0.1 }[score.sampleConfidence]
-  const accuracyFactor = reliability?.winRate ?? winRate ?? (score.entryEdgeScore / 100)
-  const consistency = accuracyFactor * confWeight
-  const signalBase = reliabilityScore * 0.75 + score.overall * 0.25
-
-  const allocationPct = Math.min(10, Math.max(0.5, 1 + 9 * (signalBase / 100) * Math.max(0.4, consistency)))
+  const allocationPct = Math.min(10, Math.max(0.5, Math.min(10, 1 + reliabilityScore / 12)))
 
   const reasons: string[] = []
   if (reliability) {
+    for (const reason of reliability.hardFailReasons.slice(0, 3)) reasons.push(reason)
     reasons.push(`✓ Reliability ${reliability.reliabilityScore}/100`)
     reasons.push(`✓ ${reliability.reliabilityLabel}`)
     reasons.push(`✓ Current streak ${reliability.currentLosingStreak > 0 ? `losing ${reliability.currentLosingStreak}` : 'not losing'}`)
     reasons.push(`✓ Worst losing streak ${reliability.worstLosingStreak}`)
+    if (reliability.winRate !== null) reasons.push(`✓ ${(reliability.winRate * 100).toFixed(0)}% win rate on resolved positions`)
     if (reliability.realizedPnl !== null) reasons.push(`✓ Realized PnL ${reliability.realizedPnl >= 0 ? '+' : ''}${formatUSD(Math.abs(reliability.realizedPnl))}`)
+    if (reliability.totalPnl !== null) reasons.push(`✓ Total PnL ${reliability.totalPnl >= 0 ? '+' : ''}${formatUSD(Math.abs(reliability.totalPnl))}`)
   }
   if (score.sampleSize < 5) reasons.push(`⚠ Only ${score.sampleSize} trades — signal unreliable`)
   if (score.sampleSize >= 20) reasons.push(`✓ ${score.sampleSize} trades — meaningful sample`)
@@ -50,10 +48,10 @@ function computeRecommendation(score: EdgeScore, winRate: number | null, reliabi
   let action: Recommendation['action']
   let confidence: Recommendation['confidence']
 
-  if ((reliability?.copySignal === 'COPY' && reliabilityScore >= 75) || (signalBase >= 75 && consistency >= 0.5)) {
+  if (reliability?.copySignal === 'COPY' && reliabilityScore >= 75 && (reliability.winRate ?? 0) >= 0.45 && (reliability.realizedPnl ?? 0) >= 0) {
     action = 'COPY'
     confidence = reliability?.confidence === 'High' ? 'High' : 'Medium'
-  } else if (signalBase >= 50) {
+  } else if (reliability && reliability.reliabilityScore >= 50 && reliability.hardFailReasons.length === 0) {
     action = 'WATCH'
     confidence = 'Low'
   } else {
