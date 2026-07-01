@@ -183,3 +183,11 @@ export function formatDate(iso: string | null): string {
   if (isNaN(d.getTime())) return '—'
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
+
+export function buildPolymarketMarketUrl(slug?: string | null): string | null {
+  if (typeof slug !== 'string') return null
+  const clean = slug.trim()
+  if (!clean) return null
+  if (!/^[a-z0-9-]+$/i.test(clean)) return null
+  return `https://polymarket.com/market/${clean}`
+}

@@ -1,14 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { WalletTrade, WalletPosition } from '../types'
 import { getWalletActivity, getWalletPositions, filterNoise, truncateAddress } from '../api/wallets'
-import { formatUSD, formatDate, formatPercent, toFiniteNumber } from '../api/polymarket'
+import { buildPolymarketMarketUrl, formatUSD, formatDate, formatPercent, toFiniteNumber } from '../api/polymarket'
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
 import { batchFetchPrices } from '../api/priceTracker'
 import { assessPositionFollowability, buildTraderPerformanceSnapshot, evaluateTraderQualityFromSnapshot } from '../api/traderQuality'
 import { getClosedPositions } from '../api/wallets'
-import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
+import { loadPortfolio, createPortfolio, addSimulatedTrade, addSimulatedPositionFollow, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
-import { cacheGet, cacheSet, cacheTime, cacheInvalidate, TTL, formatAge } from '../api/cache'
+import { cacheGet, cacheSet, cacheTime, cacheInvalidatePrefix, TTL, formatAge } from '../api/cache'
 import EdgeScoreCard from './EdgeScoreCard'
 import PriceChart from './PriceChart'
 import PnLGraph from './PnLGraph'
@@ -43,16 +43,85 @@ function LazyChart({ tokenId, trades, title }: { tokenId: string; trades: Wallet
   )
 }
 
+interface ProofField {
+  label: string
+  value: string
+  href?: string | null
+}
+
+function truncateHash(value: string | null | undefined): string {
+  if (!value) return '—'
+  if (value.length <= 16) return value
+  return `${value.slice(0, 10)}…${value.slice(-6)}`
+}
+
+function proofRow(field: ProofField, index: number) {
+  return (
+    <div className="trade-detail-line" key={`${field.label}-${index}`}>
+      <strong>{field.label}:</strong>{' '}
+      {field.href ? (
+        <a className="poly-link" href={field.href} target="_blank" rel="noopener noreferrer">
+          {field.value} ↗
+        </a>
+      ) : (
+        <span>{field.value}</span>
+      )}
+    </div>
+  )
+}
+
+function buildTradeProofFields(trade: WalletTrade, sourceWallet: string): ProofField[] {
+  const marketUrl = buildPolymarketMarketUrl(trade.slug || trade.eventSlug || null)
+  return [
+    { label: 'Source label', value: 'Polymarket public API /activity' },
+    { label: 'Source wallet', value: sourceWallet },
+    { label: 'Timestamp', value: new Date(trade.timestamp * 1000).toLocaleString('en-US') },
+    { label: 'Market link', value: marketUrl ? 'Open market' : 'URL unavailable', href: marketUrl },
+    { label: 'Condition ID', value: trade.conditionId },
+    { label: 'Token / asset ID', value: trade.asset },
+    { label: 'Transaction hash', value: truncateHash(trade.transactionHash) },
+    { label: 'Source endpoint', value: 'https://data-api.polymarket.com/activity' },
+  ]
+}
+
+function buildPositionProofFields(position: WalletPosition, sourceWallet: string): ProofField[] {
+  const marketUrl = buildPolymarketMarketUrl(position.slug || null)
+  return [
+    { label: 'Source label', value: 'Polymarket public API /positions' },
+    { label: 'Source wallet', value: sourceWallet },
+    { label: 'Timestamp', value: 'Available from current snapshot only' },
+    { label: 'Market link', value: marketUrl ? 'Open market' : 'URL unavailable', href: marketUrl },
+    { label: 'Condition ID', value: position.conditionId },
+    { label: 'Token / asset ID', value: position.asset },
+    { label: 'Source endpoint', value: 'https://data-api.polymarket.com/positions' },
+  ]
+}
+
+function buildClosedPositionProofFields(position: Awaited<ReturnType<typeof getClosedPositions>>[number], sourceWallet: string): ProofField[] {
+  const marketUrl = buildPolymarketMarketUrl(position.slug || null)
+  return [
+    { label: 'Source label', value: 'Polymarket public API /closed-positions' },
+    { label: 'Source wallet', value: sourceWallet },
+    { label: 'Close date', value: formatDate(position.endDate) },
+    { label: 'Market link', value: marketUrl ? 'Open market' : 'URL unavailable', href: marketUrl },
+    { label: 'Condition ID', value: position.conditionId },
+    { label: 'Token / asset ID', value: position.asset },
+    { label: 'Source endpoint', value: 'https://data-api.polymarket.com/closed-positions' },
+  ]
+}
+
 function TradeRow({
   trade,
   onFollow,
   allTradesForMarket,
   currentPrice,
+  proofFields,
 }: {
   trade: WalletTrade
   onFollow: (t: WalletTrade) => void
   allTradesForMarket: WalletTrade[]
   currentPrice: number | null
+  proofFields: ProofField[]
 }) {
   const [chartOpen, setChartOpen] = useState(false)
   const [expanded, setExpanded] = useState(false)
@@ -119,6 +188,7 @@ function TradeRow({
               <strong>Estimated PnL:</strong> {delta >= 0 ? '+' : ''}{formatUSD(Math.abs(delta) * (trade.usdcSize ?? 0))}
             </div>
           )}
+          {proofFields.map(proofRow)}
         </div>
       )}
       {chartOpen && tokenId && (
@@ -137,9 +207,15 @@ function TradeRow({
 function CurrentPositionRow({
   position,
   copyRiskLabel,
+  sourceWallet,
+  onPaperFollow,
+  proofFields,
 }: {
   position: WalletPosition
   copyRiskLabel: string
+  sourceWallet: string
+  onPaperFollow: (position: WalletPosition) => void
+  proofFields: ProofField[]
 }) {
   const shares = toFiniteNumber(position.size, 0)
   const entry = formatPercent(position.avgPrice, 1).replace('%', '¢')
@@ -153,9 +229,12 @@ function CurrentPositionRow({
     <div className="position-row">
       <div className="position-top">
         <span className="trade-title">{position.title}</span>
-        <span className={`pnl-badge ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>
-          {pnlPos ? '+' : ''}{formatUSD(pnl)}
-        </span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="follow-btn" onClick={() => onPaperFollow(position)}>Paper follow this position</button>
+          <span className={`pnl-badge ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>
+            {pnlPos ? '+' : ''}{formatUSD(pnl)}
+          </span>
+        </div>
       </div>
       <div className="trade-row-meta">
         <span className="trade-outcome">{position.outcome}</span>
@@ -167,16 +246,37 @@ function CurrentPositionRow({
         <span className="stat date">{label}</span>
         <span className={`stat date ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>{copyRiskLabel}</span>
       </div>
+      <div className="trade-row-details">
+        <div className="trade-detail-line"><strong>Source trader:</strong> {truncateAddress(sourceWallet)}</div>
+        <div className="trade-detail-line"><strong>Open exposure:</strong> {formatUSD(position.currentValue ?? 0)} not profit</div>
+        {proofFields.map(proofRow)}
+      </div>
     </div>
   )
 }
 
 export default function WalletProfile({ address, onBack, onViewPortfolio }: Props) {
   const normalizedAddress = address.toLowerCase()
-  const [trades, setTrades] = useState<WalletTrade[]>([])
+  const overviewLimit = 60
+  const initialHistoryLimit = 100
+  const chartLimit = 120
+
+  const [overviewTrades, setOverviewTrades] = useState<WalletTrade[]>([])
+  const [historyTrades, setHistoryTrades] = useState<WalletTrade[]>([])
+  const [chartTrades, setChartTrades] = useState<WalletTrade[]>([])
   const [positions, setPositions] = useState<WalletPosition[]>([])
-  const [loading, setLoading] = useState(true)
+  const [closedPositions, setClosedPositions] = useState<Awaited<ReturnType<typeof getClosedPositions>>>([])
+  const [overviewLoading, setOverviewLoading] = useState(true)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [chartsLoading, setChartsLoading] = useState(false)
+  const [historyLoaded, setHistoryLoaded] = useState(false)
+  const [chartsLoaded, setChartsLoaded] = useState(false)
+  const [positionsLoading, setPositionsLoading] = useState(true)
+  const [closedLoading, setClosedLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [positionsError, setPositionsError] = useState<string | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [chartsError, setChartsError] = useState<string | null>(null)
   const [minSize, setMinSize] = useState(1)
   const [tab, setTab] = useState<ProfileTab>('overview')
   const [followMsg, setFollowMsg] = useState<string | null>(null)
@@ -185,139 +285,281 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [scoreLoading, setScoreLoading] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
   const [livePrices, setLivePrices] = useState<Map<string, number>>(new Map())
-  const [positionsError, setPositionsError] = useState<string | null>(null)
-  const [closedPositions, setClosedPositions] = useState<Awaited<ReturnType<typeof getClosedPositions>>>([])
+  const [historyLimit, setHistoryLimit] = useState(initialHistoryLimit)
 
-  const actKey = `wallet:${normalizedAddress}:activity`
-  const posKey = `wallet:${normalizedAddress}:positions`
+  const overviewKey = `wallet:${normalizedAddress}:overview:${overviewLimit}`
+  const positionsKey = `wallet:${normalizedAddress}:positions`
+  const closedKey = `wallet:${normalizedAddress}:closed`
 
-  const loadWalletData = useCallback((forceRefresh = false) => {
+  const loadOverview = useCallback((forceRefresh = false) => {
     if (!forceRefresh) {
-      const cachedAct = cacheGet<WalletTrade[]>(actKey, TTL.wallet)
-      const cachedPos = cacheGet<WalletPosition[]>(posKey, TTL.wallet)
-      if (cachedAct !== null && cachedPos !== null) {
-        setTrades(cachedAct)
-        setPositions(cachedPos)
+      const cachedTrades = cacheGet<WalletTrade[]>(overviewKey, TTL.wallet)
+      const cachedPositions = cacheGet<WalletPosition[]>(positionsKey, TTL.wallet)
+      const cachedClosed = cacheGet<Awaited<ReturnType<typeof getClosedPositions>>>(closedKey, TTL.wallet)
+      if (cachedTrades && cachedPositions && cachedClosed) {
+        setOverviewTrades(cachedTrades)
+        setPositions(cachedPositions)
+        setClosedPositions(cachedClosed)
+        setError(null)
         setPositionsError(null)
-        setLastUpdated(Math.min(cacheTime(actKey) ?? Date.now(), cacheTime(posKey) ?? Date.now()))
-        setLoading(false)
+        setOverviewLoading(false)
+        setPositionsLoading(false)
+        setClosedLoading(false)
+        setLastUpdated(Math.max(cacheTime(overviewKey) ?? 0, cacheTime(positionsKey) ?? 0, cacheTime(closedKey) ?? 0))
         return
       }
     }
-    setLoading(true)
+
+    setOverviewLoading(true)
+    setPositionsLoading(true)
+    setClosedLoading(true)
     setError(null)
     setPositionsError(null)
+
     Promise.allSettled([
-      getWalletActivity(normalizedAddress, 200),
+      getWalletActivity(normalizedAddress, overviewLimit),
       getWalletPositions(normalizedAddress, 100),
       getClosedPositions(normalizedAddress, 100),
-    ])
-      .then(([actsResult, posResult, closedResult]) => {
-        if (actsResult.status === 'fulfilled') {
-          cacheSet(actKey, actsResult.value)
-          setTrades(actsResult.value)
-        } else {
-          setError('Wallet activity unavailable from public API.')
-        }
+    ]).then(([activityResult, positionsResult, closedResult]) => {
+      if (activityResult.status === 'fulfilled') {
+        cacheSet(overviewKey, activityResult.value)
+        setOverviewTrades(activityResult.value)
+      } else {
+        setError('Wallet activity unavailable from public API.')
+      }
 
-        if (posResult.status === 'fulfilled') {
-          cacheSet(posKey, posResult.value)
-          setPositions(posResult.value)
-          setPositionsError(null)
-        } else {
-          setPositions([])
-          setPositionsError('Current positions unavailable from public API.')
-        }
+      if (positionsResult.status === 'fulfilled') {
+        cacheSet(positionsKey, positionsResult.value)
+        setPositions(positionsResult.value)
+        setPositionsError(null)
+      } else {
+        setPositions([])
+        setPositionsError('Current positions unavailable from public API.')
+      }
 
-        if (closedResult.status === 'fulfilled') {
-          setClosedPositions(closedResult.value)
-        } else {
-          setClosedPositions([])
-        }
-        setLastUpdated(Date.now())
+      if (closedResult.status === 'fulfilled') {
+        cacheSet(closedKey, closedResult.value)
+        setClosedPositions(closedResult.value)
+      } else {
+        setClosedPositions([])
+      }
+
+      setOverviewLoading(false)
+      setPositionsLoading(false)
+      setClosedLoading(false)
+      setLastUpdated(Date.now())
+    })
+  }, [normalizedAddress, overviewKey, positionsKey, closedKey])
+
+  const loadHistory = useCallback((limit = historyLimit, forceRefresh = false) => {
+    const key = `wallet:${normalizedAddress}:history:${limit}`
+    if (!forceRefresh) {
+      const cached = cacheGet<WalletTrade[]>(key, TTL.wallet)
+      if (cached) {
+        setHistoryTrades(cached)
+        setHistoryLoaded(true)
+        setHistoryError(null)
+        setHistoryLoading(false)
+        return
+      }
+    }
+
+    setHistoryLoading(true)
+    setHistoryError(null)
+    getWalletActivity(normalizedAddress, limit)
+      .then(data => {
+        cacheSet(key, data)
+        setHistoryTrades(data)
+        setHistoryLoaded(true)
       })
-      .finally(() => setLoading(false))
-  }, [normalizedAddress, actKey, posKey])
+      .catch(() => {
+        setHistoryError('Trade history unavailable from public API.')
+        setHistoryLoaded(true)
+      })
+      .finally(() => setHistoryLoading(false))
+  }, [normalizedAddress, historyLimit])
+
+  const loadCharts = useCallback((forceRefresh = false) => {
+    const key = `wallet:${normalizedAddress}:charts:${chartLimit}`
+    if (!forceRefresh) {
+      if (historyTrades.length > 0) {
+        setChartTrades(historyTrades)
+        setChartsLoaded(true)
+        setChartsError(null)
+        setChartsLoading(false)
+        return
+      }
+      const cached = cacheGet<WalletTrade[]>(key, TTL.wallet)
+      if (cached) {
+        setChartTrades(cached)
+        setChartsLoaded(true)
+        setChartsError(null)
+        setChartsLoading(false)
+        return
+      }
+    }
+
+    setChartsLoading(true)
+    setChartsError(null)
+    getWalletActivity(normalizedAddress, chartLimit)
+      .then(data => {
+        cacheSet(key, data)
+        setChartTrades(data)
+        setChartsLoaded(true)
+      })
+      .catch(() => {
+        setChartsError('Entry chart data unavailable from public API.')
+        setChartsLoaded(true)
+      })
+      .finally(() => setChartsLoading(false))
+  }, [normalizedAddress, historyTrades])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadWalletData()
+      setWatching(isWatchingWallet(normalizedAddress))
+      setMinSize(1)
+      setTab('overview')
+      setOverviewTrades([])
+      setHistoryTrades([])
+      setChartTrades([])
+      setPositions([])
+      setClosedPositions([])
+      setHistoryLoaded(false)
+      setChartsLoaded(false)
+      setHistoryLoading(false)
+      setChartsLoading(false)
+      setHistoryError(null)
+      setChartsError(null)
+      setPositionsError(null)
+      setError(null)
+      setFollowMsg(null)
+      setLastUpdated(null)
+      setScore(null)
+      setHistoryLimit(initialHistoryLimit)
+      setOverviewLoading(true)
+      setHistoryLoading(false)
+      setChartsLoading(false)
+      setPositionsLoading(true)
+      setClosedLoading(true)
+      loadOverview()
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [loadWalletData])
+  }, [normalizedAddress, loadOverview])
 
-  // 30-second polling — only re-fetches when TTL expires (3min); otherwise uses cache
   useEffect(() => {
-    const timer = setInterval(() => loadWalletData(), 30_000)
+    const timer = setInterval(() => loadOverview(), 30_000)
     return () => clearInterval(timer)
-  }, [loadWalletData])
+  }, [loadOverview])
 
-  // Re-score whenever trades or size filter changes (prices may be cached for 30s)
   useEffect(() => {
-    const noisy = filterNoise(trades, minSize)
+    const sourceTrades = filterNoise(overviewTrades, minSize)
     const timer = window.setTimeout(() => {
-      if (noisy.length === 0) {
+      if (sourceTrades.length === 0) {
         setScore(null)
         setScoreLoading(false)
         return
       }
       setScoreLoading(true)
-      computeEntryScore(noisy)
+      computeEntryScore(sourceTrades)
         .then(setScore)
         .catch(() => setScore(null))
         .finally(() => setScoreLoading(false))
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [minSize, trades])
+  }, [overviewTrades, minSize])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (tab === 'trades') {
+        loadHistory(historyLimit)
+      }
+      if (tab === 'charts') {
+        loadCharts()
+      }
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [tab, historyLimit, loadHistory, loadCharts])
 
   const handleRefresh = useCallback(() => {
-    cacheInvalidate(actKey, posKey)
+    cacheInvalidatePrefix(`wallet:${normalizedAddress}:`)
     setScore(null)
-    loadWalletData(true)
-  }, [actKey, posKey, loadWalletData])
+    setOverviewTrades([])
+    setHistoryTrades([])
+    setChartTrades([])
+    setPositions([])
+    setClosedPositions([])
+    setHistoryLoading(false)
+    setChartsLoading(false)
+    setHistoryError(null)
+    setChartsError(null)
+    setPositionsError(null)
+    loadOverview(true)
+  }, [normalizedAddress, loadOverview])
 
   const handleToggleWatch = () => {
-    const pseudonym = trades[0]?.pseudonym ?? ''
-    const name = trades[0]?.name ?? ''
-    if (watching) { unwatchWallet(normalizedAddress); setWatching(false) }
-    else { watchWallet(normalizedAddress, pseudonym, name); setWatching(true) }
+    const sourceTrades = overviewTrades.length > 0 ? overviewTrades : historyTrades
+    const pseudonym = sourceTrades[0]?.pseudonym ?? ''
+    const name = sourceTrades[0]?.name ?? ''
+    if (watching) {
+      unwatchWallet(normalizedAddress)
+      setWatching(false)
+    } else {
+      watchWallet(normalizedAddress, pseudonym, name)
+      setWatching(true)
+    }
   }
 
   const handleFollow = (trade: WalletTrade) => {
-    let p = loadPortfolio()
-    if (!p) p = createPortfolio(1000)
+    let portfolio = loadPortfolio()
+    if (!portfolio) portfolio = createPortfolio(1000)
     const paperSize = Math.max(1, Math.min(10, (trade.usdcSize ?? 10) / 10))
-    savePortfolio(addSimulatedTrade(p, trade, paperSize))
+    savePortfolio(addSimulatedTrade(portfolio, trade, paperSize))
     setFollowMsg(`Followed: ${trade.title} (Paper ${formatUSD(paperSize)})`)
     setTimeout(() => setFollowMsg(null), 3500)
   }
 
-  const filtered = filterNoise(trades, minSize)
-  const marketCount = new Set(filtered.map(t => t.conditionId)).size
-  const totalVol = filtered.reduce((s, t) => s + (t.usdcSize ?? 0), 0)
-  const pseudonym = trades[0]?.pseudonym || ''
-  const name = trades[0]?.name || ''
+  const handlePaperFollowPosition = (position: WalletPosition) => {
+    let portfolio = loadPortfolio()
+    if (!portfolio) portfolio = createPortfolio(1000)
+    const simulatedSize = Math.max(1, position.initialValue > 0 ? position.initialValue : position.currentValue || 1)
+    savePortfolio(addSimulatedPositionFollow(portfolio, position, normalizedAddress, simulatedSize))
+    setFollowMsg(`Paper followed: ${position.title} (Paper ${formatUSD(simulatedSize)})`)
+    setTimeout(() => setFollowMsg(null), 3500)
+  }
+
+  const overviewFiltered = filterNoise(overviewTrades, minSize)
+  const marketCount = new Set(overviewFiltered.map(t => t.conditionId)).size
+  const totalVol = overviewFiltered.reduce((s, t) => s + (t.usdcSize ?? 0), 0)
+  const sourceTrades = overviewTrades.length > 0 ? overviewTrades : historyTrades
+  const pseudonym = sourceTrades[0]?.pseudonym || ''
+  const name = sourceTrades[0]?.name || ''
 
   useEffect(() => {
-    const assets = [...new Set(filtered.map(t => t.asset).filter(Boolean))].slice(0, 20)
-    if (assets.length === 0) return
     let cancelled = false
-    batchFetchPrices(assets)
-      .then(map => {
-        if (!cancelled) setLivePrices(map)
-      })
-      .catch(() => {
+    const timer = window.setTimeout(() => {
+      const assets = [...new Set(overviewFiltered.map(t => t.asset).filter(Boolean))].slice(0, 20)
+      if (assets.length === 0) {
         if (!cancelled) setLivePrices(new Map())
-      })
+        return
+      }
+      batchFetchPrices(assets)
+        .then(map => {
+          if (!cancelled) setLivePrices(map)
+        })
+        .catch(() => {
+          if (!cancelled) setLivePrices(new Map())
+        })
+    }, 0)
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
-  }, [filtered])
+  }, [overviewFiltered])
 
   const performanceSnapshot = buildTraderPerformanceSnapshot({
     wallet: normalizedAddress,
-    trades: filtered,
-    recentTrades: filtered.slice(0, 40),
+    trades: overviewFiltered,
+    recentTrades: overviewFiltered.slice(0, 40),
     positions,
     closedPositions,
     priceMap: livePrices,
@@ -329,8 +571,41 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const openValue = performanceSnapshot.openExposure
   const winRate = performanceSnapshot.winRate
   const activePositions = positions.filter(p => (p.initialValue ?? 0) > 0 || (p.currentValue ?? 0) > 0 || p.redeemable === false)
+  const historyRows = historyTrades
+  const filteredHistoryRows = filterNoise(historyRows, minSize)
+  const chartRows = chartTrades
   const positionFollowLabel = (position: WalletPosition) =>
     assessPositionFollowability(position, traderQuality)
+  const suspiciousAudit = traderQuality.luckyWinRisk ||
+    traderQuality.outlierDriven ||
+    (traderQuality.winRate !== null && traderQuality.winRate >= 0.95) ||
+    Math.abs(traderQuality.metrics.realizedPnl) >= 5000 ||
+    (performanceSnapshot.topWinShare !== null && performanceSnapshot.topWinShare >= 60)
+
+  const buildAuditReasons = () => {
+    const reasons: string[] = []
+    reasons.push(`Records analyzed: ${performanceSnapshot.sampleSize}`)
+    reasons.push(`Closed positions analyzed: ${performanceSnapshot.closedCount}`)
+    if (performanceSnapshot.largestWin !== 0) {
+      reasons.push(`Largest win contribution: ${formatUSD(performanceSnapshot.largestWin)}`)
+    }
+    reasons.push(`PnL excluding largest win: ${formatUSD(performanceSnapshot.pnlExcludingLargestWin)}`)
+    if (performanceSnapshot.medianPositionPnl !== null) {
+      reasons.push(`Median position PnL: ${formatUSD(performanceSnapshot.medianPositionPnl)}`)
+    }
+    if (performanceSnapshot.topWinShare !== null) {
+      reasons.push(`Top win share: ${performanceSnapshot.topWinShare.toFixed(0)}%`)
+    }
+    reasons.push(
+      performanceSnapshot.closedCount >= 100
+        ? 'History may be API-limited'
+        : 'History window not obviously capped',
+    )
+    reasons.push('Open exposure is excluded from realized profit')
+    return reasons
+  }
+
+  const auditReasons = buildAuditReasons()
 
   return (
     <div className="detail-page">
@@ -349,10 +624,10 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             type="button"
             className="refresh-btn"
             onClick={handleRefresh}
-            disabled={loading}
+            disabled={overviewLoading || historyLoading || chartsLoading}
             title="Refresh wallet data"
           >
-            {loading ? '↻' : '↻ Refresh'}
+            {(overviewLoading || historyLoading || chartsLoading) ? '↻' : '↻ Refresh'}
           </button>
         </div>
         {onViewPortfolio && (
@@ -369,11 +644,13 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
         {(pseudonym || name) && <p className="wallet-address">{truncateAddress(address)}</p>}
       </div>
 
-      {loading && <p className="empty-msg">Loading wallet data…</p>}
+      {(overviewLoading || positionsLoading || closedLoading) && <p className="empty-msg">Loading wallet performance…</p>}
       {error && <p className="error-msg">{error}</p>}
       {positionsError && <p className="error-msg">{positionsError}</p>}
+      {historyError && <p className="error-msg">{historyError}</p>}
+      {chartsError && <p className="error-msg">{chartsError}</p>}
 
-      {!loading && !error && (
+      {!overviewLoading && !error && (
         <>
           <div className="wallet-quality-banner">
             <div className="data-source-label" style={{ marginBottom: traderQuality.plainReasons.length > 0 ? 8 : 0 }}>
@@ -398,10 +675,22 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             )}
           </div>
 
+          {suspiciousAudit && (
+            <section className="wallet-section">
+              <div className="section-header">
+                <h3 className="markets-list-title">Trader audit</h3>
+                <span className="estimate-label">Strong-looking history needs proof</span>
+              </div>
+              <ul className="hot-trader-reasons" style={{ marginTop: 0 }}>
+                {auditReasons.map((reason, index) => <li key={index}>{reason}</li>)}
+              </ul>
+            </section>
+          )}
+
           <div className="wallet-stats-row">
             <div className="wallet-stat">
-              <span className="wallet-stat-val">{filtered.length}</span>
-              <span className="wallet-stat-label">Trades</span>
+              <span className="wallet-stat-val">{overviewFiltered.length}</span>
+              <span className="wallet-stat-label">Trades loaded</span>
             </div>
             <div className="wallet-stat">
               <span className="wallet-stat-val">{marketCount}</span>
@@ -446,7 +735,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               Performance
             </button>
             <button type="button" className={`tab-btn ${tab === 'trades' ? 'active' : ''}`} onClick={() => setTab('trades')}>
-              Trade History ({filtered.length})
+              Trade History ({historyRows.length || overviewFiltered.length})
             </button>
             <button type="button" className={`tab-btn ${tab === 'charts' ? 'active' : ''}`} onClick={() => setTab('charts')}>
               Entry Charts
@@ -469,7 +758,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
 
               <CopyTradingModule
                 score={score}
-                trades={filtered}
+                trades={overviewFiltered}
                 traderQuality={traderQuality}
                 onViewPortfolio={onViewPortfolio}
                 onFollowMsg={msg => { setFollowMsg(msg); setTimeout(() => setFollowMsg(null), 4000) }}
@@ -496,18 +785,30 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
                   </select>
                 </div>
               </div>
-              {filtered.length === 0 && <p className="empty-msg">No trades above the size filter.</p>}
-              {filtered.slice(0, 100).map((t, i) => (
+              {!historyLoaded && historyRows.length === 0 && <p className="empty-msg">Loading trade history…</p>}
+              {historyLoaded && filteredHistoryRows.length === 0 && <p className="empty-msg">No trades above the size filter.</p>}
+              {filteredHistoryRows.slice(0, historyLimit).map((t, i) => (
                 <TradeRow
-                  key={t.transactionHash ?? i}
+                  key={t.transactionHash ?? `${t.conditionId}-${i}`}
                   trade={t}
                   onFollow={handleFollow}
-                  allTradesForMarket={filtered.filter(x => x.conditionId === t.conditionId)}
+                  allTradesForMarket={filteredHistoryRows.filter(x => x.conditionId === t.conditionId)}
                   currentPrice={livePrices.get(t.asset) ?? null}
+                  proofFields={buildTradeProofFields(t, t.proxyWallet)}
                 />
               ))}
-              {filtered.length > 100 && (
-                <p className="empty-msg">Showing first 100 of {filtered.length} trades.</p>
+              {historyRows.length >= historyLimit && (
+                <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    className="search-btn"
+                    onClick={() => setHistoryLimit(limit => limit + 100)}
+                    disabled={historyLoading}
+                  >
+                    {historyLoading ? 'Loading…' : 'Load more'}
+                  </button>
+                  <span className="estimate-label">Latest {historyRows.length} trades loaded</span>
+                </div>
               )}
             </section>
           )}
@@ -517,21 +818,23 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               <p className="score-disclaimer" style={{ marginBottom: 12 }}>
                 Charts load individually on click. Price history is cached for 10 minutes.
               </p>
+              {!chartsLoaded && chartRows.length === 0 && <p className="empty-msg">Loading entry charts…</p>}
+              {chartsLoaded && chartRows.length === 0 && <p className="empty-msg">No chart data available.</p>}
               {(() => {
                 const seen = new Set<string>()
                 const markets: { conditionId: string; asset: string; title: string; trades: WalletTrade[] }[] = []
-                for (const t of filtered) {
+                for (const t of chartRows) {
                   if (!seen.has(t.conditionId) && t.asset) {
                     seen.add(t.conditionId)
                     markets.push({
                       conditionId: t.conditionId,
                       asset: t.asset,
                       title: t.title,
-                      trades: filtered.filter(x => x.conditionId === t.conditionId),
+                      trades: chartRows.filter(x => x.conditionId === t.conditionId),
                     })
                   }
                 }
-                if (markets.length === 0) return <p className="empty-msg">No chart data available.</p>
+                if (markets.length === 0) return null
                 return markets.slice(0, 10).map(m => (
                   <LazyChart
                     key={m.conditionId}
@@ -564,6 +867,9 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
                     key={position.asset}
                     position={position}
                     copyRiskLabel={positionFollowLabel(position)}
+                    sourceWallet={normalizedAddress}
+                    onPaperFollow={handlePaperFollowPosition}
+                    proofFields={buildPositionProofFields(position, normalizedAddress)}
                   />
                 ))}
                 {activePositions.length > 12 && (
@@ -573,8 +879,22 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
             )}
           </section>
 
+          <section className="wallet-section">
+            <div className="section-header">
+              <h3 className="markets-list-title">Verification proof</h3>
+              <span className="estimate-label">Market, wallet, and source IDs</span>
+            </div>
+            {closedPositions.length === 0 && <p className="empty-msg">No closed position proof available.</p>}
+            {closedPositions.slice(0, 5).map((position, index) => (
+              <div className="trade-row-details" key={`${position.asset}-${index}`}>
+                {buildClosedPositionProofFields(position, normalizedAddress).map(proofRow)}
+              </div>
+            ))}
+          </section>
+
           <div className="data-source-label">
-            Polymarket public API · {filtered.length} trades · {positionsWithValue.length} positions
+            Polymarket public API · {overviewFiltered.length} trades loaded · {positionsWithValue.length} positions ·
+            performance uses closed-position realized PnL
           </div>
         </>
       )}

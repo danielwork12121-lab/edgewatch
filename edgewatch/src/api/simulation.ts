@@ -1,5 +1,28 @@
-import type { WalletTrade } from '../types'
+import type { WalletPosition, WalletTrade } from '../types'
 import { batchFetchPrices } from './priceTracker'
+import { buildPolymarketMarketUrl } from './polymarket'
+
+export interface PaperFollowMeta {
+  sourceKind: 'trade' | 'position'
+  sourceWallet: string
+  sourceLabel: string
+  marketTitle: string
+  outcome: string
+  tokenId: string
+  conditionId: string
+  entryPrice: number
+  currentPrice: number
+  simulatedAmountUSDC: number
+  timestamp: number
+  closeDate: string | null
+  polymarketUrl: string | null
+  sourceEndpoint: string
+  sourceIds: {
+    transactionHash: string | null
+    assetId: string | null
+    conditionId: string
+  }
+}
 
 export interface SimulatedTrade {
   originalTrade: WalletTrade
@@ -13,6 +36,7 @@ export interface SimulatedTrade {
   status: 'open' | 'closed' | 'expired'
   simulatedAt: number
   lastRefreshedAt: number | null
+  followMeta: PaperFollowMeta
 }
 
 export interface PaperPortfolio {
@@ -54,6 +78,7 @@ export function addSimulatedTrade(
   trade: WalletTrade,
   sizeUSDC: number,
 ): PaperPortfolio {
+  const sourceUrl = buildPolymarketMarketUrl(trade.slug || trade.eventSlug || null)
   const entryPrice = trade.price ?? 0
   const shares = entryPrice > 0 ? sizeUSDC / entryPrice : 0
   const simTrade: SimulatedTrade = {
@@ -68,7 +93,100 @@ export function addSimulatedTrade(
     status: 'open',
     simulatedAt: Date.now(),
     lastRefreshedAt: null,
+    followMeta: {
+      sourceKind: 'trade',
+      sourceWallet: trade.proxyWallet.toLowerCase(),
+      sourceLabel: 'Polymarket public API /activity',
+      marketTitle: trade.title,
+      outcome: trade.outcome,
+      tokenId: trade.asset,
+      conditionId: trade.conditionId,
+      entryPrice,
+      currentPrice: entryPrice,
+      simulatedAmountUSDC: sizeUSDC,
+      timestamp: trade.timestamp,
+      closeDate: null,
+      polymarketUrl: sourceUrl,
+      sourceEndpoint: 'https://data-api.polymarket.com/activity',
+      sourceIds: {
+        transactionHash: trade.transactionHash ?? null,
+        assetId: trade.asset ?? null,
+        conditionId: trade.conditionId,
+      },
+    },
   }
+  const updated = { ...portfolio, trades: [simTrade, ...portfolio.trades] }
+  savePortfolio(updated)
+  return updated
+}
+
+export function addSimulatedPositionFollow(
+  portfolio: PaperPortfolio,
+  position: WalletPosition,
+  sourceWallet: string,
+  sizeUSDC?: number,
+): PaperPortfolio {
+  const entryPrice = position.avgPrice ?? 0
+  const simulatedSizeUSDC = sizeUSDC ?? (position.initialValue > 0 ? position.initialValue : position.currentValue)
+  const shares = entryPrice > 0 ? simulatedSizeUSDC / entryPrice : 0
+  const currentPrice = position.curPrice ?? entryPrice
+  const sourceUrl = buildPolymarketMarketUrl(position.slug || null)
+  const title = position.title || 'Paper follow position'
+  const outcome = position.outcome || 'Unknown'
+
+  const simTrade: SimulatedTrade = {
+    originalTrade: {
+      proxyWallet: sourceWallet.toLowerCase(),
+      timestamp: Date.now(),
+      conditionId: position.conditionId,
+      type: 'POSITION',
+      size: shares,
+      usdcSize: simulatedSizeUSDC,
+      price: entryPrice,
+      asset: position.asset,
+      side: 'BUY',
+      outcomeIndex: 0,
+      title,
+      slug: position.slug,
+      icon: '',
+      eventSlug: '',
+      outcome,
+      name: '',
+      pseudonym: '',
+    },
+    simulatedSizeUSDC,
+    simulatedShares: shares,
+    entryPrice,
+    currentPrice,
+    estimatedValue: shares * currentPrice,
+    unrealizedPnlUSDC: (shares * currentPrice) - simulatedSizeUSDC,
+    unrealizedPnlPct: simulatedSizeUSDC > 0 ? (((shares * currentPrice) - simulatedSizeUSDC) / simulatedSizeUSDC) * 100 : 0,
+    status: 'open',
+    simulatedAt: Date.now(),
+    lastRefreshedAt: null,
+    followMeta: {
+      sourceKind: 'position',
+      sourceWallet: sourceWallet.toLowerCase(),
+      sourceLabel: 'Polymarket public API /positions',
+      marketTitle: title,
+      outcome,
+      tokenId: position.asset,
+      conditionId: position.conditionId,
+      entryPrice,
+      currentPrice,
+      simulatedAmountUSDC: simulatedSizeUSDC,
+      timestamp: Date.now(),
+      closeDate: position.endDate || null,
+      polymarketUrl: sourceUrl,
+      sourceEndpoint: 'https://data-api.polymarket.com/positions',
+      sourceIds: {
+        transactionHash: null,
+        assetId: position.asset,
+        conditionId: position.conditionId,
+      },
+    },
+  }
+
   const updated = { ...portfolio, trades: [simTrade, ...portfolio.trades] }
   savePortfolio(updated)
   return updated

@@ -8,14 +8,28 @@ import {
   type PaperPortfolio as Portfolio,
   type SimulatedTrade,
 } from '../api/simulation'
-import { formatUSD, formatDate, formatPercent } from '../api/polymarket'
+import { buildPolymarketMarketUrl, formatUSD, formatDate, formatPercent } from '../api/polymarket'
+
+function formatMaybe(value: string | null | undefined, fallback = '—'): string {
+  if (typeof value !== 'string') return fallback
+  const trimmed = value.trim()
+  return trimmed ? trimmed : fallback
+}
+
+function formatId(value: string | null | undefined): string {
+  if (!value) return '—'
+  if (value.length <= 18) return value
+  return `${value.slice(0, 10)}…${value.slice(-6)}`
+}
 
 interface Props {
   onBack: () => void
 }
 
 function TradeCard({ trade }: { trade: SimulatedTrade }) {
-  const isBuy = trade.originalTrade.side === 'BUY'
+  const source = trade.followMeta
+  const sourceTrade = trade.originalTrade
+  const isBuy = sourceTrade.side === 'BUY'
   const pnlPos = trade.unrealizedPnlUSDC >= 0
   const entryDate = new Date(trade.simulatedAt).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
@@ -24,18 +38,20 @@ function TradeCard({ trade }: { trade: SimulatedTrade }) {
     ? new Date(trade.lastRefreshedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
     : null
   const priceChanged = trade.currentPrice !== trade.entryPrice
+  const sourceWallet = source?.sourceWallet ?? sourceTrade.proxyWallet
+  const marketUrl = source?.polymarketUrl ?? buildPolymarketMarketUrl(sourceTrade.slug || sourceTrade.eventSlug || null)
 
   return (
     <div className="sim-trade-card">
       <div className="trade-row-top">
         <span className={`side-badge ${isBuy ? 'buy' : 'sell'}`}>{trade.originalTrade.side}</span>
-        <span className="trade-title">{trade.originalTrade.title}</span>
+        <span className="trade-title">{source?.marketTitle ?? trade.originalTrade.title}</span>
         <span className={`pnl-badge ${pnlPos ? 'pnl-pos' : 'pnl-neg'}`}>
           {pnlPos ? '+' : ''}{formatUSD(trade.unrealizedPnlUSDC)} ({formatPercent(trade.unrealizedPnlPct, 1)})
         </span>
       </div>
       <div className="trade-row-meta">
-        <span className="trade-outcome">{trade.originalTrade.outcome}</span>
+        <span className="trade-outcome">{source?.outcome ?? trade.originalTrade.outcome}</span>
         <span className="stat vol">Paper: {formatUSD(trade.simulatedSizeUSDC)}</span>
         <span className="stat prob">Entry @ {formatPercent(trade.entryPrice, 1).replace('%', '¢')} <span className="estimate-label">(real)</span></span>
         <span className={`stat prob ${priceChanged ? (pnlPos ? 'price-up' : 'price-down') : ''}`}>
@@ -51,6 +67,43 @@ function TradeCard({ trade }: { trade: SimulatedTrade }) {
         <span className="stat vol">
           Est. value: {formatUSD(trade.estimatedValue)} <span className="estimate-label">(simulated)</span>
         </span>
+      </div>
+      <div className="trade-row-details">
+        <div className="trade-detail-line">
+          <strong>Source type:</strong> {source?.sourceKind ?? 'trade'}
+        </div>
+        <div className="trade-detail-line">
+          <strong>Source trader:</strong> {sourceWallet}
+          {source?.closeDate && (
+            <>
+              {' '}· <strong>Close date:</strong> {formatDate(source.closeDate)}
+            </>
+          )}
+        </div>
+        {marketUrl ? (
+          <div className="trade-detail-line">
+            <strong>Polymarket:</strong>{' '}
+            <a className="poly-link" href={marketUrl} target="_blank" rel="noopener noreferrer">
+              Open market ↗
+            </a>
+          </div>
+        ) : (
+          <div className="trade-detail-line">
+            <strong>Polymarket:</strong> market URL unavailable, showing IDs below
+          </div>
+        )}
+        <div className="trade-detail-line">
+          <strong>Condition:</strong> {formatId(source?.conditionId ?? sourceTrade.conditionId)}
+        </div>
+        <div className="trade-detail-line">
+          <strong>Token / asset:</strong> {formatId(source?.tokenId ?? sourceTrade.asset)}
+        </div>
+        <div className="trade-detail-line">
+          <strong>Source label:</strong> {formatMaybe(source?.sourceLabel ?? 'Polymarket public API')}
+        </div>
+        <div className="trade-detail-line">
+          <strong>Source endpoint:</strong> {formatMaybe(source?.sourceEndpoint)}
+        </div>
       </div>
     </div>
   )
@@ -138,7 +191,7 @@ export default function PaperPortfolioPage({ onBack }: Props) {
 
       <div className="data-source-label">
         <strong>Simulated paper portfolio</strong> · No real money · No wallet connection ·
-        PnL uses live CLOB prices after refresh
+        PnL uses live CLOB prices after refresh · Simulated only, not financial advice
       </div>
 
       <div className="wallet-stats-row">
@@ -176,7 +229,7 @@ export default function PaperPortfolioPage({ onBack }: Props) {
 
       <div className="section-header" style={{ marginBottom: 12 }}>
         <h3 className="markets-list-title">
-          Open Positions ({summary.openPositions})
+          Active paper follows ({summary.openPositions})
           {lastRefreshTime && (
             <span className="estimate-label" style={{ fontWeight: 400, marginLeft: 8 }}>
               · prices as of {lastRefreshTime}
@@ -200,7 +253,7 @@ export default function PaperPortfolioPage({ onBack }: Props) {
 
       {portfolio.trades.length === 0 && (
         <p className="empty-msg">
-          No simulated trades yet. Browse markets → Traders → open a wallet and click "+ Paper follow".
+          No simulated follows yet. Browse markets → Traders → open a wallet and click "+ Paper follow this position".
         </p>
       )}
 
