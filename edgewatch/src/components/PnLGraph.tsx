@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import type { WalletPosition } from '../types'
+import type { ClosedPosition } from '../api/wallets'
 import { formatUSD } from '../api/polymarket'
 
 interface Props {
-  positions: WalletPosition[]
+  wallet: string
+  closedPositions: ClosedPosition[]
 }
 
 type GraphViewMode = 'raw' | 'balanced'
@@ -22,11 +23,8 @@ interface PositionPoint {
   title: string
 }
 
-function computeStreak(positions: WalletPosition[]): StreakResult {
-  const sorted = [...positions]
-    .filter(p => (p.initialValue ?? 0) > 0)
-    .sort((a, b) => new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime())
-
+function computeStreak(positions: ClosedPosition[]): StreakResult {
+  const sorted = [...positions].sort((a, b) => new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime())
   if (sorted.length === 0) return { maxWin: 0, maxLoss: 0, currentStreak: 0, currentType: null }
 
   let maxWin = 0
@@ -35,10 +33,9 @@ function computeStreak(positions: WalletPosition[]): StreakResult {
   let curType: 'win' | 'loss' | null = null
 
   for (const pos of sorted) {
-    const type: 'win' | 'loss' = (pos.cashPnl ?? 0) >= 0 ? 'win' : 'loss'
-    if (type === curType) {
-      cur += 1
-    } else {
+    const type: 'win' | 'loss' = (pos.realizedPnl ?? 0) >= 0 ? 'win' : 'loss'
+    if (type === curType) cur += 1
+    else {
       cur = 1
       curType = type
     }
@@ -58,15 +55,13 @@ function median(values: number[]): number | null {
     : sorted[mid]
 }
 
-function buildSeries(positions: WalletPosition[]): PositionPoint[] {
-  const sorted = [...positions]
-    .filter(p => (p.initialValue ?? 0) > 0)
-    .sort((a, b) => new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime())
-
+function buildSeries(positions: ClosedPosition[]): PositionPoint[] {
+  const sorted = [...positions].sort((a, b) => new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime())
   let running = 0
   let peak = 0
+
   return sorted.map(pos => {
-    const pnl = pos.cashPnl ?? 0
+    const pnl = pos.realizedPnl ?? 0
     running += pnl
     peak = Math.max(peak, running)
     return {
@@ -94,20 +89,27 @@ const PY = 14
 const IW = W - 2 * PX
 const IH = H - 2 * PY
 
-export default function PnLGraph({ positions }: Props) {
+export default function PnLGraph({ wallet, closedPositions }: Props) {
   const [viewMode, setViewMode] = useState<GraphViewMode>('balanced')
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
 
-  const data = buildSeries(positions)
+  const graphWallet = (closedPositions[0]?.proxyWallet ?? wallet).toLowerCase()
+  if (import.meta.env.DEV && graphWallet !== wallet.toLowerCase()) {
+    console.error('[EdgeWatch][PnLGraph] wallet mismatch', { wallet, graphWallet })
+  }
+  if (graphWallet !== wallet.toLowerCase()) {
+    return <p className="error-msg">Performance graph unavailable due to wallet mismatch.</p>
+  }
 
+  const data = buildSeries(closedPositions)
   if (data.length === 0) {
-    return <p className="empty-msg">No position history available.</p>
+    return <p className="empty-msg">No closed position history available.</p>
   }
 
   const totalPnl = data[data.length - 1]?.cumPnl ?? 0
   const wins = data.filter(d => d.pnl >= 0).length
   const losses = data.length - wins
-  const streak = computeStreak(positions)
+  const streak = computeStreak(closedPositions)
   const pnls = data.map(d => d.pnl)
   const positivePnls = pnls.filter(p => p > 0)
   const largestWin = positivePnls.length > 0 ? Math.max(...positivePnls) : 0
@@ -117,6 +119,9 @@ export default function PnLGraph({ positions }: Props) {
   const maxDrawdown = Math.min(...data.map(d => d.drawdown), 0)
   const outlierContributionPct = totalPositive > 0 ? (largestWin / totalPositive) * 100 : null
   const luckyWinRisk = totalPnl > 0 && pnlExLargestWin < 0
+  const sampleLabel = closedPositions.length >= 100
+    ? `Displayed sample PnL · latest ${closedPositions.length} closed positions`
+    : 'Realized PnL from closed positions'
 
   const maxAbsBar = Math.max(...data.map(d => Math.abs(d.pnl)), 0.01)
   const maxAbsCum = Math.max(...data.map(d => Math.abs(d.cumPnl)), 0.01)
@@ -162,12 +167,18 @@ export default function PnLGraph({ positions }: Props) {
         </div>
       </div>
 
+      <div className="score-disclaimer" style={{ marginBottom: 12 }}>
+        {sampleLabel}. Open exposure is excluded from realized performance.
+      </div>
+
       <div className="pnl-graph-summary">
         <div className="pnl-sum-stat">
           <span className={`pnl-sum-val ${totalPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
             {totalPnl >= 0 ? '+' : ''}{formatUSD(totalPnl)}
           </span>
-          <span className="pnl-sum-label">Total PnL</span>
+          <span className="pnl-sum-label">
+            {closedPositions.length >= 100 ? 'Displayed sample PnL' : 'Realized PnL from closed positions'}
+          </span>
         </div>
         <div className="pnl-sum-stat">
           <span className="pnl-sum-val">
@@ -224,7 +235,7 @@ export default function PnLGraph({ positions }: Props) {
 
       {luckyWinRisk && (
         <p className="pnl-graph-alert">
-          Outlier-driven profit — total PnL is positive but PnL excluding the largest win is negative.
+          Outlier-driven profit - total realized PnL is positive but PnL excluding the largest win is negative.
         </p>
       )}
 
@@ -260,26 +271,13 @@ export default function PnLGraph({ positions }: Props) {
       </svg>
 
       {hovered && (
-        <div className="pnl-graph-tooltip">
+        <div className="pnl-hover-card">
           <strong>{hovered.title}</strong>
-          <span>Raw PnL: {hovered.pnl >= 0 ? '+' : ''}{formatUSD(hovered.pnl)}</span>
-          <span>Cumulative: {hovered.cumPnl >= 0 ? '+' : ''}{formatUSD(hovered.cumPnl)}</span>
-          <span>Drawdown: {formatUSD(hovered.drawdown)}</span>
+          <div>PnL: {hovered.pnl >= 0 ? '+' : ''}{formatUSD(hovered.pnl)}</div>
+          <div>Cumulative: {hovered.cumPnl >= 0 ? '+' : ''}{formatUSD(hovered.cumPnl)}</div>
+          <div>Drawdown: {formatUSD(hovered.drawdown)}</div>
         </div>
       )}
-
-      <div className="pnl-graph-legend">
-        <span><span className="pnl-legend-swatch pnl-legend-bar-pos" /> Per-position PnL</span>
-        <span><span className="pnl-legend-swatch pnl-legend-line" /> Cumulative PnL</span>
-        <span><span className="pnl-legend-swatch pnl-legend-dd" /> Drawdown from peak</span>
-      </div>
-
-      <p className="pnl-graph-note">
-        {viewMode === 'balanced'
-          ? 'Balanced view uses signed √ scaling so smaller trades stay visible. Hover bars for raw values.'
-          : 'Raw view uses true proportional bar heights. Hover bars for exact values.'}
-        {' · '}{data.length} positions, sorted by close date
-      </p>
     </div>
   )
 }

@@ -4,7 +4,7 @@ import { getWalletActivity, getWalletPositions, filterNoise, truncateAddress } f
 import { formatUSD, formatDate, formatPercent, toFiniteNumber } from '../api/polymarket'
 import { computeEntryScore, type EdgeScore } from '../api/scoring'
 import { batchFetchPrices } from '../api/priceTracker'
-import { assessPositionFollowability, evaluateTraderQuality } from '../api/traderQuality'
+import { assessPositionFollowability, buildTraderPerformanceSnapshot, evaluateTraderQualityFromSnapshot } from '../api/traderQuality'
 import { getClosedPositions } from '../api/wallets'
 import { loadPortfolio, createPortfolio, addSimulatedTrade, savePortfolio } from '../api/simulation'
 import { watchWallet, unwatchWallet, isWatchingWallet } from '../api/watchlist'
@@ -172,6 +172,7 @@ function CurrentPositionRow({
 }
 
 export default function WalletProfile({ address, onBack, onViewPortfolio }: Props) {
+  const normalizedAddress = address.toLowerCase()
   const [trades, setTrades] = useState<WalletTrade[]>([])
   const [positions, setPositions] = useState<WalletPosition[]>([])
   const [loading, setLoading] = useState(true)
@@ -179,7 +180,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [minSize, setMinSize] = useState(1)
   const [tab, setTab] = useState<ProfileTab>('overview')
   const [followMsg, setFollowMsg] = useState<string | null>(null)
-  const [watching, setWatching] = useState(() => isWatchingWallet(address))
+  const [watching, setWatching] = useState(() => isWatchingWallet(normalizedAddress))
   const [score, setScore] = useState<EdgeScore | null>(null)
   const [scoreLoading, setScoreLoading] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
@@ -187,8 +188,8 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const [positionsError, setPositionsError] = useState<string | null>(null)
   const [closedPositions, setClosedPositions] = useState<Awaited<ReturnType<typeof getClosedPositions>>>([])
 
-  const actKey = `wallet:${address}:activity`
-  const posKey = `wallet:${address}:positions`
+  const actKey = `wallet:${normalizedAddress}:activity`
+  const posKey = `wallet:${normalizedAddress}:positions`
 
   const loadWalletData = useCallback((forceRefresh = false) => {
     if (!forceRefresh) {
@@ -207,9 +208,9 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
     setError(null)
     setPositionsError(null)
     Promise.allSettled([
-      getWalletActivity(address, 200),
-      getWalletPositions(address, 100),
-      getClosedPositions(address, 100),
+      getWalletActivity(normalizedAddress, 200),
+      getWalletPositions(normalizedAddress, 100),
+      getClosedPositions(normalizedAddress, 100),
     ])
       .then(([actsResult, posResult, closedResult]) => {
         if (actsResult.status === 'fulfilled') {
@@ -236,7 +237,7 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
         setLastUpdated(Date.now())
       })
       .finally(() => setLoading(false))
-  }, [address, actKey, posKey])
+  }, [normalizedAddress, actKey, posKey])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -278,8 +279,8 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
   const handleToggleWatch = () => {
     const pseudonym = trades[0]?.pseudonym ?? ''
     const name = trades[0]?.name ?? ''
-    if (watching) { unwatchWallet(address); setWatching(false) }
-    else { watchWallet(address, pseudonym, name); setWatching(true) }
+    if (watching) { unwatchWallet(normalizedAddress); setWatching(false) }
+    else { watchWallet(normalizedAddress, pseudonym, name); setWatching(true) }
   }
 
   const handleFollow = (trade: WalletTrade) => {
@@ -313,19 +314,20 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
     }
   }, [filtered])
 
-  const traderQuality = evaluateTraderQuality({
+  const performanceSnapshot = buildTraderPerformanceSnapshot({
+    wallet: normalizedAddress,
     trades: filtered,
     recentTrades: filtered.slice(0, 40),
     positions,
     closedPositions,
     priceMap: livePrices,
   })
+  const traderQuality = evaluateTraderQualityFromSnapshot(performanceSnapshot)
 
   const positionsWithValue = positions.filter(p => (p.initialValue ?? 0) > 0)
-  const realizedPnl = positions.reduce((s, p) => s + (p.realizedPnl ?? 0), 0)
-  const openValue = positions.reduce((s, p) => s + (p.currentValue ?? 0), 0)
-  const wins = positionsWithValue.filter(p => (p.cashPnl ?? 0) >= 0).length
-  const winRate = positionsWithValue.length > 0 ? wins / positionsWithValue.length : null
+  const realizedPnl = performanceSnapshot.realizedPnl
+  const openValue = performanceSnapshot.openExposure
+  const winRate = performanceSnapshot.winRate
   const activePositions = positions.filter(p => (p.initialValue ?? 0) > 0 || (p.currentValue ?? 0) > 0 || p.redeemable === false)
   const positionFollowLabel = (position: WalletPosition) =>
     assessPositionFollowability(position, traderQuality)
@@ -421,19 +423,19 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               <span className={`wallet-stat-val ${realizedPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
                 {realizedPnl >= 0 ? '+' : ''}{formatUSD(realizedPnl)}
               </span>
-              <span className="wallet-stat-label">Realized PnL</span>
+              <span className="wallet-stat-label">Realized PnL from closed positions</span>
             </div>
             <div className="wallet-stat">
               <span className={`wallet-stat-val ${openValue >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
                 {formatUSD(openValue)}
               </span>
-              <span className="wallet-stat-label">Open exposure</span>
+              <span className="wallet-stat-label">Open exposure, not profit</span>
             </div>
           </div>
 
-          {positionsWithValue.length > 0 ? (
+          {closedPositions.length > 0 ? (
             <section className="wallet-section wallet-section-highlight">
-              <PnLGraph positions={positionsWithValue} />
+              <PnLGraph wallet={normalizedAddress} closedPositions={closedPositions} />
             </section>
           ) : (
             <p className="empty-msg">No closed position history available for performance graph.</p>

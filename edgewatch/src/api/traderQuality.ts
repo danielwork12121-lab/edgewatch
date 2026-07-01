@@ -52,6 +52,39 @@ export interface RepeatableTraderQuality {
   backtest: FollowBacktest
 }
 
+export interface TraderPerformanceSnapshot {
+  wallet: string
+  trades: WalletTrade[]
+  recentTrades: WalletTrade[]
+  openPositions: WalletPosition[]
+  closedPositions: ClosedPosition[]
+  priceMap: Map<string, number>
+  closedPositionPnls: number[]
+  realizedPnl: number
+  openExposure: number
+  openPnl: number
+  totalPnl: number
+  totalVolumeUSDC: number
+  winCount: number
+  lossCount: number
+  winRate: number | null
+  profitFactor: number | null
+  medianPositionPnl: number | null
+  largestWin: number
+  pnlExcludingLargestWin: number
+  topWinShare: number | null
+  maxDrawdown: number | null
+  currentStreak: number
+  worstLosingStreak: number
+  marketsTraded: number
+  sampleSize: number
+  closedCount: number
+  livePricedTrades: number
+  timingEdgePct: number | null
+  recentTimingEdgePct: number | null
+  recentLivePricedTrades: number
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
@@ -200,55 +233,55 @@ export function summarizeActiveBets(
     }))
 }
 
-export function computeRepeatableTraderQuality(input: {
+export function buildTraderPerformanceSnapshot(input: {
+  wallet?: string
   trades: WalletTrade[]
-  recentTrades: WalletTrade[]
+  recentTrades?: WalletTrade[]
   positions: WalletPosition[]
   closedPositions: ClosedPosition[]
   priceMap: Map<string, number>
-}): RepeatableTraderQuality {
-  const { trades, recentTrades, positions, closedPositions, priceMap } = input
-
-  const closedPnls = closedPositions
-    .map(p => toFiniteNumber(p.realizedPnl, 0))
-    .filter(v => Number.isFinite(v))
-
-  const positionPnls = positions
-    .filter(p => (p.initialValue ?? 0) > 0)
-    .map(p => toFiniteNumber(p.realizedPnl ?? p.cashPnl, 0))
-
-  const outcomePnls = closedPnls.length >= 5 ? closedPnls : positionPnls.length >= 5 ? positionPnls : closedPnls
-
-  const realizedPnl = outcomePnls.reduce((s, v) => s + v, 0)
-  const totalRisked = closedPositions.reduce((s, p) => s + toFiniteNumber(p.totalBought, 0), 0)
-    || positions.reduce((s, p) => s + toFiniteNumber(p.initialValue, 0), 0)
-  const roi = totalRisked > 0 ? realizedPnl / totalRisked : null
-
-  const profitFactor = computeProfitFactor(outcomePnls)
-  const wins = outcomePnls.filter(v => v > 0)
-  const winRate = outcomePnls.length > 0 ? wins.length / outcomePnls.length : null
-  const medianOutcome = median(outcomePnls)
-  const totalPositive = wins.reduce((s, v) => s + v, 0)
-  const largestWin = wins.length > 0 ? Math.max(...wins) : 0
-  const winConcentrationPct = totalPositive > 0 ? (largestWin / totalPositive) * 100 : null
-  const pnlExcludingLargestWin = realizedPnl - largestWin
-  const profitFactorExTopWin = computeProfitFactor(
-    outcomePnls.filter(v => v !== largestWin || v <= 0),
-  )
-
-  const streakSource = outcomePnls.map(v => ({ won: v >= 0 }))
-  const streaks = analyzeStreaks(streakSource)
-  const drawdownPct = computeDrawdownPct(outcomePnls)
-
-  const orderedTrades = [...trades]
+}): TraderPerformanceSnapshot {
+  const orderedTrades = [...input.trades]
     .filter(t => t.type === 'TRADE' && (t.usdcSize ?? 0) >= 1)
     .sort((a, b) => a.timestamp - b.timestamp)
 
-  const recentOrdered = [...recentTrades]
+  const recentOrdered = [...(input.recentTrades ?? input.trades)]
     .filter(t => t.type === 'TRADE' && (t.usdcSize ?? 0) >= 1)
 
+  const closedPositionPnls = input.closedPositions
+    .map(p => toFiniteNumber(p.realizedPnl, 0))
+    .filter(v => Number.isFinite(v))
+
+  const realizedPnl = closedPositionPnls.reduce((sum, value) => sum + value, 0)
+  const openExposure = input.positions.reduce((sum, pos) => sum + toFiniteNumber(pos.currentValue, 0), 0)
+  const openPnl = input.positions.reduce((sum, pos) => sum + toFiniteNumber(pos.cashPnl, 0), 0)
+  const totalPnl = realizedPnl + openPnl
+  const totalVolumeUSDC = orderedTrades.reduce((sum, trade) => sum + (trade.usdcSize ?? 0), 0)
+
+  const wins = closedPositionPnls.filter(v => v > 0)
+  const winCount = wins.length
+  const lossCount = closedPositionPnls.length - winCount
+  const winRate = closedPositionPnls.length > 0 ? winCount / closedPositionPnls.length : null
+  const profitFactor = computeProfitFactor(closedPositionPnls)
+  const medianPositionPnl = median(closedPositionPnls)
+  const largestWin = wins.length > 0 ? Math.max(...wins) : 0
+  const totalPositive = wins.reduce((sum, value) => sum + value, 0)
+  const pnlExcludingLargestWin = realizedPnl - largestWin
+  const topWinShare = totalPositive > 0 ? (largestWin / totalPositive) * 100 : null
+
+  let cumulative = 0
+  let peak = 0
+  let maxDrawdown = 0
+  for (const pnl of closedPositionPnls) {
+    cumulative += pnl
+    peak = Math.max(peak, cumulative)
+    maxDrawdown = Math.max(maxDrawdown, peak - cumulative)
+  }
+
+  const streaks = analyzeStreaks(closedPositionPnls.map(pnl => ({ won: pnl >= 0 })))
+
   const liveOutcomes = orderedTrades.flatMap(trade => {
-    const current = priceMap.get(trade.asset)
+    const current = input.priceMap.get(trade.asset)
     const entry = trade.price ?? 0
     if (current === undefined || entry <= 0) return []
     const signed = trade.side === 'BUY'
@@ -258,7 +291,7 @@ export function computeRepeatableTraderQuality(input: {
   })
 
   const recentOutcomes = recentOrdered.flatMap(trade => {
-    const current = priceMap.get(trade.asset)
+    const current = input.priceMap.get(trade.asset)
     const entry = trade.price ?? 0
     if (current === undefined || entry <= 0) return []
     const signed = trade.side === 'BUY'
@@ -274,17 +307,85 @@ export function computeRepeatableTraderQuality(input: {
   const recentTimingEdgePct = recentOutcomes.length > 0
     ? (recentOutcomes.filter(o => o.positive).length / recentOutcomes.length) * 100
     : null
+  const recentLivePricedTrades = recentOutcomes.length
 
-  const openValue = positions.reduce((s, p) => s + toFiniteNumber(p.currentValue, 0), 0)
   const marketsTraded = new Set([
-    ...trades.map(t => t.conditionId),
-    ...closedPositions.map(p => p.conditionId),
+    ...input.trades.map(t => t.conditionId),
+    ...input.closedPositions.map(p => p.conditionId),
   ].filter(Boolean)).size
+
+  return {
+    wallet: (input.wallet ?? input.closedPositions[0]?.proxyWallet ?? input.trades[0]?.proxyWallet ?? '').toLowerCase(),
+    trades: orderedTrades,
+    recentTrades: recentOrdered,
+    openPositions: input.positions,
+    closedPositions: input.closedPositions,
+    priceMap: input.priceMap,
+    closedPositionPnls,
+    realizedPnl,
+    openExposure,
+    openPnl,
+    totalPnl,
+    totalVolumeUSDC,
+    winCount,
+    lossCount,
+    winRate,
+    profitFactor,
+    medianPositionPnl,
+    largestWin,
+    pnlExcludingLargestWin,
+    topWinShare,
+    maxDrawdown,
+    currentStreak: streaks.currentLosingStreak,
+    worstLosingStreak: streaks.worstLosingStreak,
+    marketsTraded,
+    sampleSize: orderedTrades.length,
+    closedCount: input.closedPositions.length,
+    livePricedTrades,
+    timingEdgePct,
+    recentTimingEdgePct,
+    recentLivePricedTrades,
+  }
+}
+
+function deriveRepeatableTraderQualityFromSnapshot(snapshot: TraderPerformanceSnapshot): RepeatableTraderQuality {
+  const {
+    trades,
+    recentTrades,
+    closedPositions,
+    closedPositionPnls,
+    realizedPnl,
+    openExposure,
+    winRate,
+    profitFactor,
+    medianPositionPnl,
+    largestWin,
+    pnlExcludingLargestWin,
+    topWinShare,
+    maxDrawdown,
+    currentStreak,
+    worstLosingStreak,
+    marketsTraded,
+    sampleSize,
+    closedCount,
+    livePricedTrades,
+    timingEdgePct,
+    recentTimingEdgePct,
+    recentLivePricedTrades,
+  } = snapshot
+
+  const roi = closedPositionPnls.length > 0
+    ? realizedPnl / Math.max(closedPositions.reduce((sum, p) => sum + toFiniteNumber(p.totalBought, 0), 0), 1)
+    : null
+
+  const profitFactorExTopWin = computeProfitFactor(
+    closedPositionPnls.filter(v => v !== largestWin || v <= 0),
+  )
 
   const luckyWinRisk =
     (realizedPnl > 0 && pnlExcludingLargestWin < 0) ||
-    (winConcentrationPct !== null && winConcentrationPct > 55 && (winRate ?? 1) < 0.5) ||
-    (medianOutcome !== null && medianOutcome < 0 && realizedPnl > 0) ||
+    (topWinShare !== null && topWinShare > 55 && (winRate ?? 1) < 0.5) ||
+    (medianPositionPnl !== null && medianPositionPnl < 0 && realizedPnl > 0) ||
     (profitFactorExTopWin !== null && profitFactorExTopWin < 1.05 && realizedPnl > 0)
 
   const outlierDriven = luckyWinRisk || (pnlExcludingLargestWin < 0 && realizedPnl > 0)
@@ -294,19 +395,22 @@ export function computeRepeatableTraderQuality(input: {
     if (plainReasons.length < 6) plainReasons.push(text)
   }
 
-  if (realizedPnl >= 0 && closedPnls.length >= 10) {
+  if (realizedPnl >= 0 && closedPositionPnls.length >= 10) {
     pushReason('Profitable across many closed positions')
   }
-  if (profitFactor !== null && profitFactor >= 1.25 && outcomePnls.length >= 10) {
-    pushReason(`Profit factor ${profitFactor.toFixed(2)} across ${outcomePnls.length} positions`)
+  if (profitFactor !== null && profitFactor >= 1.25 && closedPositionPnls.length >= 10) {
+    pushReason(`Profit factor ${profitFactor.toFixed(2)} across ${closedPositionPnls.length} positions`)
   }
   if (pnlExcludingLargestWin >= 0 && realizedPnl > 0) {
     pushReason('Positive after removing largest win')
   }
-  if (drawdownPct !== null && drawdownPct <= 25) {
-    pushReason('Low drawdown')
+  if (maxDrawdown !== null) {
+    const drawdownPct = computeDrawdownPct(closedPositionPnls)
+    if (drawdownPct !== null && drawdownPct <= 25) {
+      pushReason('Low drawdown')
+    }
   }
-  if (qualityComponentsRecentStrong(recentTimingEdgePct, recentOutcomes.length, timingEdgePct, livePricedTrades)) {
+  if (qualityComponentsRecentStrong(recentTimingEdgePct, recentTrades.length, timingEdgePct, livePricedTrades)) {
     pushReason('Consistent recent and long-term results')
   }
 
@@ -315,12 +419,12 @@ export function computeRepeatableTraderQuality(input: {
     roi,
     profitFactor,
     winRate,
-    medianOutcome,
-    drawdownPct,
-    streaks,
-    sampleSize: Math.max(outcomePnls.length, orderedTrades.length),
+    medianOutcome: medianPositionPnl,
+    drawdownPct: computeDrawdownPct(closedPositionPnls),
+    streaks: { currentLosingStreak: currentStreak, worstLosingStreak },
+    sampleSize: Math.max(closedPositionPnls.length, sampleSize),
     marketsTraded,
-    openValue,
+    openValue: openExposure,
     luckyWinRisk,
     outlierDriven,
     livePricedTrades,
@@ -331,10 +435,10 @@ export function computeRepeatableTraderQuality(input: {
   const recentQualityScore = computeQualityScore({
     ...scoreInputs,
     timingEdgePct: recentTimingEdgePct ?? timingEdgePct,
-    sampleSize: Math.max(recentOrdered.length, Math.floor(scoreInputs.sampleSize / 3)),
+    sampleSize: Math.max(recentTrades.length, Math.floor(scoreInputs.sampleSize / 3)),
   })
 
-  const backtest = simulateFollowBacktest(orderedTrades, priceMap)
+  const backtest = simulateFollowBacktest(trades, snapshot.priceMap)
 
   const tierResult = classifyTier({
     qualityScore,
@@ -344,21 +448,21 @@ export function computeRepeatableTraderQuality(input: {
     profitFactor,
     profitFactorExTopWin,
     winRate,
-    medianOutcome,
-    drawdownPct,
-    currentLosingStreak: streaks.currentLosingStreak,
-    worstLosingStreak: streaks.worstLosingStreak,
-    closedPositions: outcomePnls.length,
-    recentTrades: recentOrdered.length,
-    historicalTrades: orderedTrades.length,
+    medianOutcome: medianPositionPnl,
+    drawdownPct: computeDrawdownPct(closedPositionPnls),
+    currentLosingStreak: currentStreak,
+    worstLosingStreak,
+    closedPositions: closedCount,
+    recentTrades: recentTrades.length,
+    historicalTrades: trades.length,
     marketsTraded,
-    openValue,
+    openValue: openExposure,
     luckyWinRisk,
     outlierDriven,
     pnlExcludingLargestWin,
     timingEdgePct: recentTimingEdgePct ?? timingEdgePct,
     livePricedTrades,
-    recentLivePriced: recentOutcomes.length,
+    recentLivePriced: recentLivePricedTrades,
   })
 
   if (tierResult.tier === 'reliable' || tierResult.tier === 'watch') {
@@ -367,9 +471,9 @@ export function computeRepeatableTraderQuality(input: {
     pushReason('Outlier-driven profit — not enough repeatable evidence')
   } else if (luckyWinRisk) {
     pushReason('Profit depends on one large win')
-  } else if (medianOutcome !== null && medianOutcome < 0) {
+  } else if (medianPositionPnl !== null && medianPositionPnl < 0) {
     pushReason('Median result is negative')
-  } else if (openValue > 0 && realizedPnl < 0 && openValue > Math.abs(realizedPnl) * 1.5) {
+  } else if (openExposure > 0 && realizedPnl < 0 && openExposure > Math.abs(realizedPnl) * 1.5) {
     pushReason('Large exposure with weak history')
   }
 
@@ -381,15 +485,15 @@ export function computeRepeatableTraderQuality(input: {
     profitFactor,
     profitFactorExTopWin,
     winRate,
-    medianOutcome,
-    winConcentrationPct,
-    drawdownPct,
-    currentLosingStreak: streaks.currentLosingStreak,
-    worstLosingStreak: streaks.worstLosingStreak,
-    closedPositions: outcomePnls.length,
-    sampleTrades: orderedTrades.length,
+    medianOutcome: medianPositionPnl,
+    winConcentrationPct: topWinShare,
+    drawdownPct: computeDrawdownPct(closedPositionPnls),
+    currentLosingStreak: currentStreak,
+    worstLosingStreak,
+    closedPositions: closedCount,
+    sampleTrades: sampleSize,
     marketsTraded,
-    openValue,
+    openValue: openExposure,
     livePricedTrades,
     timingEdgePct,
     luckyWinRisk,
@@ -403,6 +507,23 @@ export function computeRepeatableTraderQuality(input: {
     tier: tierResult.tier,
     backtest,
   }
+}
+
+export function computeRepeatableTraderQuality(input: {
+  trades: WalletTrade[]
+  recentTrades: WalletTrade[]
+  positions: WalletPosition[]
+  closedPositions: ClosedPosition[]
+  priceMap: Map<string, number>
+}): RepeatableTraderQuality {
+  const snapshot = buildTraderPerformanceSnapshot({
+    trades: input.trades,
+    recentTrades: input.recentTrades,
+    positions: input.positions,
+    closedPositions: input.closedPositions,
+    priceMap: input.priceMap,
+  })
+  return deriveRepeatableTraderQualityFromSnapshot(snapshot)
 }
 
 function qualityComponentsRecentStrong(
@@ -686,17 +807,8 @@ function splitQualityReasons(
   return { positiveReasons, riskLabels }
 }
 
-export function evaluateTraderQuality(input: {
-  trades: WalletTrade[]
-  recentTrades?: WalletTrade[]
-  positions: WalletPosition[]
-  closedPositions: ClosedPosition[]
-  priceMap: Map<string, number>
-}): TraderQualityEvaluation {
-  const base = computeRepeatableTraderQuality({
-    ...input,
-    recentTrades: input.recentTrades ?? input.trades,
-  })
+export function evaluateTraderQualityFromSnapshot(snapshot: TraderPerformanceSnapshot): TraderQualityEvaluation {
+  const base = deriveRepeatableTraderQualityFromSnapshot(snapshot)
   const copySignal = deriveCopySignal(base.tier)
   const { level, label } = deriveDataConfidence(base.closedPositions, base.sampleTrades)
   const { positiveReasons, riskLabels } = splitQualityReasons(
@@ -753,6 +865,20 @@ export function evaluateTraderQuality(input: {
     currentLosingStreak: base.currentLosingStreak,
     worstLosingStreak: base.worstLosingStreak,
   }
+}
+
+export function evaluateTraderQuality(input: {
+  trades: WalletTrade[]
+  recentTrades?: WalletTrade[]
+  positions: WalletPosition[]
+  closedPositions: ClosedPosition[]
+  priceMap: Map<string, number>
+}): TraderQualityEvaluation {
+  const snapshot = buildTraderPerformanceSnapshot({
+    ...input,
+    recentTrades: input.recentTrades ?? input.trades,
+  })
+  return evaluateTraderQualityFromSnapshot(snapshot)
 }
 
 export function categorizeQualityRejection(reason: string): string {
