@@ -379,7 +379,11 @@ export default function WalletProfile({ address, onBack, onViewPortfolio }: Prop
               {' · '}
               Reliability {traderQuality.reliabilityScore}/100
               {' · '}
+              Copy signal {traderQuality.copySignal}
+              {' · '}
               {traderQuality.dataConfidenceLabel}
+              {' · '}
+              Entry timing {traderQuality.metrics.timingEdgePct !== null ? `${traderQuality.metrics.timingEdgePct.toFixed(0)}%` : 'n/a'}
               {traderQuality.luckyWinRisk ? ' · Lucky win risk flagged' : ''}
               {traderQuality.outlierDriven ? ' · Outlier-driven profit' : ''}
             </div>

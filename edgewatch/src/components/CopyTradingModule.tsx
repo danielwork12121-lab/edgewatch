@@ -27,13 +27,13 @@ function computeRecommendation(
   const allocationPct = Math.min(10, Math.max(0.5, 1 + reliabilityScore / 12))
 
   const reasons: string[] = []
-  if (evaluation) {
-    for (const reason of evaluation.rejectionReasons.slice(0, 3)) reasons.push(`⚠ ${reason}`)
-    for (const label of evaluation.riskLabels) reasons.push(`⚠ ${label}`)
-    for (const reason of evaluation.positiveReasons.slice(0, 4)) reasons.push(`✓ ${reason}`)
-    reasons.push(`✓ Reliability ${evaluation.reliabilityScore}/100`)
-    reasons.push(`✓ ${evaluation.dataConfidenceLabel}`)
-    reasons.push(`✓ Copy signal ${evaluation.copySignal}`)
+    if (evaluation) {
+      for (const reason of evaluation.rejectionReasons.slice(0, 3)) reasons.push(`⚠ ${reason}`)
+      for (const label of evaluation.riskLabels) reasons.push(`⚠ ${label}`)
+      for (const reason of evaluation.positiveReasons.slice(0, 4)) reasons.push(`✓ ${reason}`)
+      reasons.push(`✓ Reliability ${evaluation.reliabilityScore}/100`)
+      reasons.push(`✓ ${evaluation.dataConfidenceLabel}`)
+      reasons.push(`✓ Copy signal ${evaluation.copySignal}`)
     reasons.push(
       evaluation.metrics.currentLosingStreak > 0
         ? `✓ Current streak losing ${evaluation.metrics.currentLosingStreak}`
@@ -53,7 +53,7 @@ function computeRecommendation(
   if (score.sampleSize < 5) reasons.push(`⚠ Only ${score.sampleSize} trades in entry-timing sample`)
   if (score.sampleSize >= 20) reasons.push(`✓ ${score.sampleSize} trades in entry-timing sample`)
   if (score.entryEdgeScore >= 60) {
-    reasons.push(`✓ Entry timing ${score.entryEdgeScore}/100 (timing only — not overall reliability)`)
+    reasons.push(`✓ Entry timing score ${score.entryEdgeScore}/100 (timing only — not overall reliability)`)
   }
   if (score.avgDeltaCents > 3) reasons.push(`✓ +${score.avgDeltaCents.toFixed(1)}¢ avg price move after entry`)
   if (score.avgDeltaCents < -3) {
@@ -65,7 +65,7 @@ function computeRecommendation(
 
   return {
     action: evaluation?.copySignal ?? 'IGNORE',
-    dataConfidence: evaluation?.confidenceLevel ?? 'Low',
+    dataConfidence: evaluation?.dataConfidence ?? 'Low',
     allocationPct,
     reasons,
   }

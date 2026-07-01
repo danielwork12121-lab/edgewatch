@@ -27,12 +27,13 @@ function ReliableTraderCard({ trader, rank, onSelectWallet }: { trader: HotTrade
             <div className="estimate-label">{truncateAddress(trader.address)}</div>
           </div>
           <div className="trader-card-badges">
+            <span className="confidence-badge badge-green">{trader.tierLabel}</span>
             <span className={`confidence-badge ${reliabilityBadge}`}>Reliability {Math.round(trader.reliabilityScore)}/100</span>
             <span className={`confidence-badge ${trader.copySignal === 'COPY' ? 'badge-green' : trader.copySignal === 'WATCH' ? 'badge-yellow' : 'badge-red'}`}>
-              {trader.copySignal}
+              Copy signal {trader.copySignal}
             </span>
-            <span className={`confidence-badge ${trader.confidence === 'High' ? 'badge-green' : trader.confidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
-              Data confidence {trader.confidence}
+            <span className={`confidence-badge ${trader.dataConfidence === 'High' ? 'badge-green' : trader.dataConfidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
+              {trader.dataConfidenceLabel}
             </span>
           </div>
         </div>
@@ -126,9 +127,9 @@ export default function ReliableCandidatesFeed({ onSelectWallet }: Props) {
     <section className="homepage-section hot-traders-section">
       <div className="section-heading">
         <div>
-          <h2 className="section-title">Reliable Copy Candidates</h2>
+          <h2 className="section-title">Reliable Traders</h2>
           <p className="section-subtitle">
-            Wallets with enough history to evaluate for copying. Weak history stays out.
+            Wallets with enough history to evaluate for reliability. Weak history stays out.
           </p>
         </div>
         <div className="refresh-bar">
@@ -140,7 +141,7 @@ export default function ReliableCandidatesFeed({ onSelectWallet }: Props) {
       {error && <p className="error-msg">{error}</p>}
       {!loading && !error && traders.length === 0 && (
         <p className="empty-msg">
-          {feedResult?.message ?? 'No reliable copy candidates found right now.'}
+          {feedResult?.message ?? 'No reliable traders found right now.'}
         </p>
       )}
 

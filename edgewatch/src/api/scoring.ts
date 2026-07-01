@@ -111,7 +111,7 @@ function computeRepeatabilityScore(uniqueMarkets: number, totalTrades: number): 
 }
 
 const CONFIDENCE_LABEL: Record<EdgeScore['sampleConfidence'], string> = {
-  very_low: 'Data confidence Very Low (< 5 trades for entry timing)',
+  very_low: 'Data confidence Very Low · fewer than 5 trades analyzed for entry timing',
   low: 'Data confidence Low · 5–20 trades analyzed',
   medium: 'Data confidence Medium · 20–50 trades analyzed',
   high: 'Data confidence High · 50+ trades analyzed',

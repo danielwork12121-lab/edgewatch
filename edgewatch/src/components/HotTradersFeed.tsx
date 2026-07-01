@@ -13,8 +13,8 @@ const devLog = (...args: unknown[]) => {
 }
 
 function HotTraderCard({ trader, rank, onSelectWallet }: { trader: HotTraderEntry; rank: number; onSelectWallet: (address: string) => void }) {
-  const confidence = trader.hotScore >= 65 ? 'High' : trader.hotScore >= 35 ? 'Medium' : 'Low'
-  const historyLabel = trader.reliabilityLabel
+  const activityBadge = trader.hotScore >= 65 ? 'badge-green' : trader.hotScore >= 35 ? 'badge-yellow' : 'badge-orange'
+  const historyLabel = trader.tierLabel
   return (
     <div className="trader-card hot-trader-card">
       <div className="trader-card-rank">#{rank}</div>
@@ -25,18 +25,21 @@ function HotTraderCard({ trader, rank, onSelectWallet }: { trader: HotTraderEntr
             <div className="estimate-label">{truncateAddress(trader.address)}</div>
           </div>
           <div className="trader-card-badges">
-            <span className={`confidence-badge ${confidence === 'High' ? 'badge-green' : confidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
-              {confidence} · Hot {Math.round(trader.hotScore)}/100
+            <span className={`confidence-badge ${activityBadge}`}>
+              Activity {Math.round(trader.hotScore)}/100
             </span>
             <span className={`confidence-badge ${trader.reliabilityScore >= 75 ? 'badge-green' : trader.reliabilityScore >= 50 ? 'badge-yellow' : 'badge-orange'}`}>
               Reliability {Math.round(trader.reliabilityScore)}/100
             </span>
             <span className={`confidence-badge ${trader.copySignal === 'COPY' ? 'badge-green' : trader.copySignal === 'WATCH' ? 'badge-yellow' : 'badge-red'}`}>
-              {trader.copySignal}
+              Copy signal {trader.copySignal}
             </span>
-            {trader.winRate !== null && (
+            <span className={`confidence-badge ${trader.dataConfidence === 'High' ? 'badge-green' : trader.dataConfidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
+              {trader.dataConfidenceLabel}
+            </span>
+            {trader.timingEdge !== null && (
               <span className="confidence-badge badge-yellow">
-                {(trader.winRate * 100).toFixed(0)}% win rate
+                Entry timing {trader.timingEdge.toFixed(0)}%
               </span>
             )}
           </div>

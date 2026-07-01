@@ -1,4 +1,5 @@
 import type { PolyEvent, WalletTrade, WalletPosition, TraderRankEntry } from '../types'
+import type { ClosedPosition } from './wallets'
 import { getClosedPositions, getMarketHolders, getMarketTrades, getWalletActivity, getWalletPositions, truncateAddress } from './wallets'
 import { formatUSD, fetchTrending, searchEvents, toFiniteNumber } from './polymarket'
 import { batchFetchPrices } from './priceTracker'
@@ -19,13 +20,16 @@ export interface HotTraderEntry {
   pseudonym: string
   name: string
   candidateTier: CandidateTier
+  tierLabel: string
   hotScore: number
   reliabilityScore: number
   qualityScore: number
   recentQualityScore: number
   copySignal: 'COPY' | 'WATCH' | 'IGNORE'
   confidence: 'Low' | 'Medium' | 'High'
+  dataConfidence: 'Low' | 'Medium' | 'High'
   dataConfidenceLabel: string
+  evaluation: TraderQualityEvaluation | null
   recentTradeCount: number
   recentVolumeUSDC: number
   avgTradeSize: number
@@ -172,7 +176,7 @@ export interface TraderReliability {
   reliabilityLabel: string
   reliabilityReasons: string[]
   hardFailReasons: string[]
-  candidateTier: 'reliable' | 'watch' | 'ignored'
+  candidateTier: CandidateTier
   currentLosingStreak: number
   worstLosingStreak: number
   realizedPnl: number | null
@@ -313,255 +317,61 @@ function computeHotScore(agg: HotWalletAgg): number {
   return Math.max(0, Math.min(100, score))
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
-}
-
-function confidenceFromCount(sampleSize: number, liveCoverage: number): 'Low' | 'Medium' | 'High' {
-  if (liveCoverage < 0.5) return 'Low'
-  if (sampleSize >= 40) return 'High'
-  if (sampleSize >= 15) return 'Medium'
-  return 'Low'
-}
-
-function analyzeStreaks(outcomes: Array<{ won: boolean }>): { currentLosingStreak: number; worstLosingStreak: number; currentWinningStreak: number; worstWinningStreak: number } {
-  let currentLosingStreak = 0
-  let currentWinningStreak = 0
-  let worstLosingStreak = 0
-  let worstWinningStreak = 0
-  let runningLoss = 0
-  let runningWin = 0
-
-  for (const outcome of outcomes) {
-    if (outcome.won) {
-      runningWin += 1
-      runningLoss = 0
-    } else {
-      runningLoss += 1
-      runningWin = 0
-    }
-    worstWinningStreak = Math.max(worstWinningStreak, runningWin)
-    worstLosingStreak = Math.max(worstLosingStreak, runningLoss)
-  }
-
-  for (let i = outcomes.length - 1; i >= 0; i -= 1) {
-    if (outcomes[i].won) {
-      if (currentLosingStreak > 0) break
-      currentWinningStreak += 1
-    } else {
-      if (currentWinningStreak > 0) break
-      currentLosingStreak += 1
-    }
-  }
-
-  return { currentLosingStreak, worstLosingStreak, currentWinningStreak, worstWinningStreak }
-}
-
-function buildReliabilityReasons(data: {
-  sampleSize: number
-  resolvedPositions: number
-  winRate: number | null
-  realizedPnl: number | null
-  worstLosingStreak: number
-  currentLosingStreak: number
-  profitFactor: number | null
-  drawdownPct: number | null
-  concentrationPct: number | null
-  openValue: number | null
-  reliabilityScore: number
-  hardFailReasons: string[]
-  livePriceCoverage: number
-}): string[] {
-  const reasons: string[] = []
-  for (const reason of data.hardFailReasons) reasons.push(reason)
-  reasons.push(`✓ ${data.sampleSize} historical trades`)
-  if (data.resolvedPositions > 0) reasons.push(`✓ ${data.resolvedPositions} closed positions`)
-  if (data.winRate !== null) reasons.push(`✓ ${(data.winRate * 100).toFixed(0)}% win rate`)
-  if (data.realizedPnl !== null) reasons.push(`✓ Realized PnL ${data.realizedPnl >= 0 ? '+' : ''}${formatUSD(data.realizedPnl)}`)
-  if (data.profitFactor !== null) reasons.push(`✓ Profit factor ${data.profitFactor.toFixed(2)}`)
-  if (data.drawdownPct !== null) reasons.push(`✓ Drawdown ${(data.drawdownPct).toFixed(0)}%`)
-  reasons.push(`✓ Current streak ${data.currentLosingStreak > 0 ? `losing ${data.currentLosingStreak}` : 'not losing'}`)
-  reasons.push(`✓ Worst losing streak ${data.worstLosingStreak}`)
-  if (data.concentrationPct !== null && data.concentrationPct > 0) {
-    reasons.push(`${data.concentrationPct >= 60 ? '⚠' : '•'} One-trade concentration ${data.concentrationPct.toFixed(0)}%`)
-  }
-  if (data.openValue !== null) reasons.push(`✓ Open value ${formatUSD(data.openValue)}`)
-  reasons.push(`✓ Live-priced trades ${Math.round(data.livePriceCoverage * 100)}%`)
-  reasons.push(`✓ Reliability ${Math.round(data.reliabilityScore)}/100`)
-  return reasons.slice(0, 8)
-}
-
 export function analyzeTraderReliability(
   trades: WalletTrade[],
   positions: Array<{ cashPnl?: number | null; realizedPnl?: number | null; currentValue?: number | null; initialValue?: number | null }>,
   priceMap: Map<string, number>,
 ): TraderReliability {
-  const orderedTrades = [...trades]
-    .filter(t => t.type === 'TRADE' && (t.usdcSize ?? 0) >= 1)
-    .sort((a, b) => a.timestamp - b.timestamp)
+  const normalizedPositions = positions as WalletPosition[]
+  const closedPositions: ClosedPosition[] = positions.map((position, index) => ({
+    proxyWallet: '',
+    asset: `position-${index}`,
+    conditionId: `position-${index}`,
+    avgPrice: 0,
+    totalBought: toFiniteNumber(position.initialValue ?? position.currentValue, 0),
+    realizedPnl: toFiniteNumber(position.realizedPnl ?? position.cashPnl, 0),
+    curPrice: toFiniteNumber(position.currentValue, 0),
+    title: '',
+    slug: '',
+    icon: '',
+    eventSlug: '',
+    outcome: '',
+    outcomeIndex: 0,
+    oppositeOutcome: '',
+    oppositeAsset: '',
+    endDate: '',
+  }))
 
-  const resolved = orderedTrades.flatMap(trade => {
-    const currentPrice = priceMap.get(trade.asset)
-    const entryPrice = trade.price ?? 0
-    if (currentPrice === undefined || entryPrice <= 0) return []
-    const won = trade.side === 'BUY' ? currentPrice > entryPrice : currentPrice < entryPrice
-    const signedPnl = trade.side === 'BUY'
-      ? (currentPrice - entryPrice) * (trade.usdcSize ?? 0)
-      : (entryPrice - currentPrice) * (trade.usdcSize ?? 0)
-    return [{ won, signedPnl }]
+  const evaluation = evaluateTraderQuality({
+    trades,
+    recentTrades: trades,
+    positions: normalizedPositions,
+    closedPositions,
+    priceMap,
   })
-
-  const wins = resolved.filter(r => r.won).length
-  const losses = resolved.length - wins
-  const winRate = resolved.length > 0 ? wins / resolved.length : null
-  const signedPnls = resolved.map(r => r.signedPnl)
-  const totalPositive = signedPnls.filter(v => v > 0).reduce((s, v) => s + v, 0)
-  const totalNegative = Math.abs(signedPnls.filter(v => v < 0).reduce((s, v) => s + v, 0))
-  const profitFactor = totalNegative > 0 ? totalPositive / totalNegative : (totalPositive > 0 ? 9.99 : null)
-
-  const streaks = analyzeStreaks(resolved)
-  const realizedPnl = positions.reduce((sum, pos) => sum + toFiniteNumber(pos.realizedPnl ?? pos.cashPnl, 0), 0)
-  const openValue = positions.reduce((sum, pos) => sum + toFiniteNumber(pos.currentValue, 0), 0)
-  const openPnl = positions.reduce((sum, pos) => sum + toFiniteNumber(pos.cashPnl, 0), 0)
-  const totalPnl = realizedPnl + openPnl
-  const closedPositions = positions.filter(pos => (pos.initialValue ?? 0) > 0).length
-  const sampleSize = orderedTrades.length
-  const resolvedPositions = closedPositions
-  const livePriceCoverage = sampleSize > 0 ? resolved.length / sampleSize : 0
-
-  let cumulative = 0
-  let peak = 0
-  let maxDrawdown = 0
-  for (const pnl of signedPnls) {
-    cumulative += pnl
-    peak = Math.max(peak, cumulative)
-    maxDrawdown = Math.max(maxDrawdown, peak - cumulative)
-  }
-  const drawdownPct = peak > 0 ? (maxDrawdown / peak) * 100 : null
-
-  const avgSignedPnl = signedPnls.length > 0 ? signedPnls.reduce((s, v) => s + v, 0) / signedPnls.length : 0
-  const entryEdgeScore = clamp(50 + avgSignedPnl * 0.5, 0, 100)
-  const sampleSizeScore = clamp((Math.max(sampleSize, resolvedPositions * 2) / 20) * 100, 0, 100)
-  const winRateScore = winRate === null ? 0 : clamp(winRate * 100, 0, 100)
-  const realizedPnlScore = clamp(50 + Math.log10(Math.abs(realizedPnl) + 1) * (realizedPnl >= 0 ? 12 : -12), 0, 100)
-  const streakScore = clamp(100 - streaks.worstLosingStreak * 7 - streaks.currentLosingStreak * 10, 0, 100)
-  const profitFactorScore = profitFactor === null ? 50 : clamp(50 + (profitFactor >= 1 ? Math.log10(profitFactor + 1) * 25 : -Math.log10(1 / Math.max(profitFactor, 0.01) + 1) * 25), 0, 100)
-  const consistencyScore = clamp((streakScore * 0.6) + (profitFactorScore * 0.4), 0, 100)
-  const drawdownScore = clamp(100 - (drawdownPct ?? 50), 0, 100)
-  const exposurePenalty = openValue > 0 && realizedPnl < 0 && openValue > Math.abs(realizedPnl) * 2 ? 20 : 0
-  const openExposureScore = clamp(100 - Math.min(100, openValue > 0 ? (openValue / Math.max(Math.abs(realizedPnl), 1)) * 25 : 0), 0, 100)
-
-  let reliabilityScore =
-    winRateScore * 0.20 +
-    realizedPnlScore * 0.20 +
-    consistencyScore * 0.20 +
-    drawdownScore * 0.15 +
-    sampleSizeScore * 0.10 +
-    entryEdgeScore * 0.10 +
-    openExposureScore * 0.05
-
-  const concentrationPct = totalPositive > 0 ? (Math.max(...signedPnls.filter(v => v > 0), 0) / totalPositive) * 100 : null
-  const hardFailReasons: string[] = []
-  if (winRate !== null && winRate < 0.35) hardFailReasons.push('Ignored: poor win rate')
-  if (realizedPnl < 0 && (winRate ?? 0) < 0.45) hardFailReasons.push('Ignored: negative realized performance')
-  if (realizedPnl <= -1000 || totalPnl <= -1000) hardFailReasons.push('Ignored: negative realized performance')
-  if (streaks.currentLosingStreak >= 5) hardFailReasons.push('Ignored: severe losing streak')
-  if (streaks.worstLosingStreak >= 15) hardFailReasons.push('Ignored: severe losing streak')
-  if (losses >= Math.max(10, wins * 3)) hardFailReasons.push('Ignored: loss count overwhelms wins')
-  if (openValue > 0 && realizedPnl < 0 && openValue > Math.max(1000, Math.abs(realizedPnl) * 2)) hardFailReasons.push('Ignored: large open exposure with poor realized performance')
-  if (concentrationPct !== null && concentrationPct > 60) hardFailReasons.push('Ignored: one big win risk')
-
-  if (winRate !== null && winRate < 0.35) reliabilityScore = Math.min(reliabilityScore, 35)
-  if (winRate !== null && winRate < 0.20) reliabilityScore = Math.min(reliabilityScore, 20)
-  if (realizedPnl < 0 && (winRate ?? 0) < 0.45) reliabilityScore = Math.min(reliabilityScore, 30)
-  if (streaks.worstLosingStreak >= 20) reliabilityScore = Math.min(reliabilityScore, 30)
-  if (streaks.currentLosingStreak >= 5) reliabilityScore = Math.min(reliabilityScore, 40)
-  if (concentrationPct !== null && concentrationPct > 60) reliabilityScore = Math.min(reliabilityScore, 30)
-  if (livePriceCoverage < 0.5) reliabilityScore = Math.min(reliabilityScore, 45)
-  reliabilityScore -= streaks.worstLosingStreak >= 15 ? 15 : 0
-  reliabilityScore -= exposurePenalty
-  reliabilityScore = clamp(reliabilityScore, 0, 100)
-
-  const confidence = confidenceFromCount(sampleSize, livePriceCoverage)
-  const hardFail = hardFailReasons.length > 0
-  const watchEligible =
-    !hardFail &&
-    (
-      reliabilityScore >= 50 ||
-      (sampleSize >= 10 && (winRate !== null ? winRate >= 0.45 : realizedPnl >= 0)) ||
-      (sampleSize >= 5 && realizedPnl !== null && realizedPnl >= 0 && streaks.currentLosingStreak < 5)
-    )
-  const copySignal: TraderReliability['copySignal'] = hardFail
-    ? 'IGNORE'
-    : reliabilityScore >= 75 && winRate !== null && winRate >= 0.45 && (realizedPnl === null || realizedPnl >= 0)
-      ? 'COPY'
-      : watchEligible
-        ? 'WATCH'
-        : 'IGNORE'
-  const candidateTier: TraderReliability['candidateTier'] =
-    copySignal === 'COPY' ? 'reliable' :
-    copySignal === 'WATCH' ? 'watch' :
-    'ignored'
-  const reliabilityLabel =
-    hardFailReasons.includes('Ignored: poor win rate') ? 'Ignored: poor win rate' :
-    hardFailReasons.includes('Ignored: severe losing streak') ? 'Ignored: severe losing streak' :
-    hardFailReasons.includes('Ignored: negative realized performance') ? 'Ignored: negative realized performance' :
-    hardFailReasons.includes('Ignored: large open exposure with poor realized performance') ? 'High activity, weak history' :
-    hardFailReasons.includes('Ignored: one big win risk') ? 'One big win risk' :
-    livePriceCoverage < 0.5 ? 'Limited live price coverage' :
-    copySignal === 'COPY' ? 'Reliable candidate' :
-    copySignal === 'WATCH' ? 'Watch candidate' :
-    openValue > 0 && (winRate ?? 0) < 0.45 ? 'High activity, weak history' :
-    streaks.currentLosingStreak >= 5 ? 'Losing streak risk' :
-    concentrationPct !== null && concentrationPct > 60 ? 'One big win risk' :
-    'Active but unreliable'
-
-  const reliabilityReasons = buildReliabilityReasons({
-    sampleSize,
-    resolvedPositions,
-    winRate,
-    realizedPnl,
-    worstLosingStreak: streaks.worstLosingStreak,
-    currentLosingStreak: streaks.currentLosingStreak,
-    profitFactor,
-    drawdownPct,
-    concentrationPct,
-    openValue,
-    reliabilityScore,
-    hardFailReasons,
-    livePriceCoverage,
-  })
-
-  const isReliableCandidate = !hardFail &&
-    (sampleSize >= 20 || resolvedPositions >= 10) &&
-    reliabilityScore >= 75 &&
-    copySignal === 'COPY' &&
-    livePriceCoverage >= 0.5 &&
-    (winRate ?? 0) >= 0.45 &&
-    realizedPnl >= 0
 
   return {
-    reliabilityScore: Math.round(reliabilityScore),
-    copySignal,
-    confidence,
-    reliabilityLabel,
-    reliabilityReasons,
-    hardFailReasons,
-    candidateTier,
-    currentLosingStreak: streaks.currentLosingStreak,
-    worstLosingStreak: streaks.worstLosingStreak,
-    realizedPnl,
-    openValue,
-    totalPnl,
-    winRate,
-    profitFactor,
-    drawdownPct,
-    livePriceCoverage,
-    winCount: wins,
-    lossCount: losses,
-    sampleSize,
-    resolvedPositions,
-    isReliableCandidate,
+    reliabilityScore: evaluation.reliabilityScore,
+    copySignal: evaluation.copySignal,
+    confidence: evaluation.dataConfidence,
+    reliabilityLabel: evaluation.tierLabel,
+    reliabilityReasons: evaluation.positiveReasons,
+    hardFailReasons: evaluation.rejectionReasons,
+    candidateTier: evaluation.tier,
+    currentLosingStreak: evaluation.currentLosingStreak,
+    worstLosingStreak: evaluation.worstLosingStreak,
+    realizedPnl: evaluation.metrics.realizedPnl,
+    openValue: evaluation.metrics.openValue,
+    totalPnl: evaluation.metrics.realizedPnl + positions.reduce((sum, pos) => sum + toFiniteNumber(pos.cashPnl, 0), 0),
+    winRate: evaluation.winRate,
+    profitFactor: evaluation.profitFactor,
+    drawdownPct: evaluation.metrics.drawdownPct,
+    livePriceCoverage: evaluation.sampleTrades > 0 ? evaluation.closedPositions / evaluation.sampleTrades : 0,
+    winCount: Math.max(0, Math.round((evaluation.winRate ?? 0) * evaluation.closedPositions)),
+    lossCount: Math.max(0, evaluation.closedPositions - Math.round((evaluation.winRate ?? 0) * evaluation.closedPositions)),
+    sampleSize: evaluation.sampleTrades,
+    resolvedPositions: evaluation.closedPositions,
+    isReliableCandidate: evaluation.copySignal === 'COPY' && evaluation.tier === 'reliable',
   }
 }
 
@@ -605,8 +415,10 @@ function applyQualityToEntry(
   return {
     ...entry,
     candidateTier: evaluation.tier,
+    tierLabel: evaluation.tierLabel,
     copySignal: evaluation.copySignal,
     confidence: evaluation.confidenceLevel,
+    dataConfidence: evaluation.dataConfidence,
     dataConfidenceLabel: evaluation.dataConfidenceLabel,
     reliabilityScore: evaluation.reliabilityScore,
     qualityScore: evaluation.qualityScore,
@@ -633,6 +445,7 @@ function applyQualityToEntry(
     candidateSource,
     activeBets,
     backtest: evaluation.backtest,
+    evaluation,
     rejectionReason: evaluation.tier === 'ignored' ? evaluation.rejectionReason : undefined,
   }
 }
@@ -687,7 +500,7 @@ function buildEmptyReasons(
     severe_losing_streak: 'severe losing streak',
     severe_drawdown: 'severe drawdown',
     weak_sample: 'weak sample size',
-    low_quality: 'low quality score',
+    low_quality: 'low reliability score',
     lucky_win_risk: 'lucky win / outlier risk',
     outlier_driven: 'outlier-driven profit',
     open_exposure_risk: 'high open exposure',
@@ -716,7 +529,7 @@ function buildEmptyReasons(
     reasons.push('No wallets were enriched with position data.')
   }
   if (reasons.length === 0) {
-    reasons.push('No wallets met copy-ready or watchlist criteria — the market may lack strong candidates right now.')
+    reasons.push('No wallets met reliable or watchlist criteria — the market may lack strong candidates right now.')
   }
   return reasons
 }
@@ -832,13 +645,16 @@ function makeHotEntry(agg: HotWalletAgg, winRate: number | null, pnl: number | n
     pseudonym: agg.pseudonym,
     name: agg.name,
     candidateTier: 'ignored',
+    tierLabel: 'Rejected',
     hotScore,
     reliabilityScore: 0,
     qualityScore: 0,
     recentQualityScore: 0,
     copySignal: 'IGNORE',
     confidence: 'Low',
+    dataConfidence: 'Low',
     dataConfidenceLabel: 'Data confidence Low · 0 records analyzed',
+    evaluation: null,
     recentTradeCount: agg.trades.length,
     recentVolumeUSDC: agg.volume,
     avgTradeSize: agg.volume / Math.max(agg.trades.length, 1),
@@ -1494,7 +1310,7 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
       }
       const result: CopyDiscoveryResult = {
         state: 'empty',
-        message: 'No strong copy candidates found in this scan.',
+        message: 'No reliable or watchlist traders found in this scan.',
         reliable: [],
         watchlist: [],
         emerging: [],
@@ -1545,12 +1361,12 @@ export async function discoverCopyCandidates(limit = 8): Promise<CopyDiscoveryRe
     const result: CopyDiscoveryResult = {
       state: hasAny ? 'ok' : 'empty',
       message: hasReliable
-        ? 'Copy-ready wallets found.'
+        ? 'Reliable wallets found.'
         : hasWatch
-          ? 'Strong watch candidates found — promising but not copy-ready yet.'
+          ? 'Watchlist candidates found — promising but not reliable yet.'
           : hasEmerging
             ? 'Emerging traders found — limited evidence, monitor only.'
-            : 'No strong copy candidates found in this scan.',
+            : 'No reliable or watchlist traders found in this scan.',
       reliable: reliableSorted,
       watchlist: watchSorted,
       emerging: emergingSorted,
@@ -1624,7 +1440,7 @@ export async function fetchReliableCopyCandidates(limit = 8): Promise<HotTraderL
     state: filtered.length > 0 ? 'ok' : 'filtered-out',
     message: filtered.length > 0
       ? 'Reliable candidates loaded'
-      : 'No reliable copy candidates found yet. Showing active traders below.',
+      : 'No reliable traders found yet. Showing active traders below.',
     traders: filtered,
     diagnostics: {
       ...universe.diagnostics,

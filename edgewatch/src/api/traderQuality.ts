@@ -572,7 +572,7 @@ function classifyTier(input: {
   }
 
   if (input.qualityScore < 55) {
-    return reject(`Quality score too low (${input.qualityScore}/100)`, 'low_quality')
+    return reject(`Reliability score too low (${input.qualityScore}/100)`, 'low_quality')
   }
   if ((input.profitFactor ?? 0) < 1.1 && input.realizedPnl <= 0) {
     return reject('Weak profit factor', 'poor_profit_factor')
@@ -608,6 +608,7 @@ export interface TraderQualityEvaluation {
   recentQualityScore: number
   copySignal: CopySignal
   confidenceLevel: DataConfidenceLevel
+  dataConfidence: DataConfidenceLevel
   dataConfidenceLabel: string
   tier: CandidateTier
   tierLabel: string
@@ -642,9 +643,9 @@ export function tierDisplayLabel(tier: CandidateTier, rejectionReason = ''): str
     case 'reliable':
       return 'Reliable candidate'
     case 'watch':
-      return 'Strong watch candidate'
+      return 'Watchlist candidate'
     case 'emerging':
-      return 'Emerging trader — limited evidence'
+      return 'Emerging candidate — limited evidence'
     case 'ignored':
       return rejectionReason || 'Rejected'
     default: {
@@ -715,6 +716,7 @@ export function evaluateTraderQuality(input: {
     recentQualityScore: base.recentQualityScore,
     copySignal,
     confidenceLevel: level,
+    dataConfidence: level,
     dataConfidenceLabel: label,
     tier: base.tier,
     tierLabel: tierDisplayLabel(base.tier, base.rejectionReason),
@@ -760,7 +762,7 @@ export function categorizeQualityRejection(reason: string): string {
   if (lower.includes('pnl') || lower.includes('profit factor')) return 'negative_pnl'
   if (lower.includes('streak')) return 'severe_losing_streak'
   if (lower.includes('drawdown')) return 'severe_drawdown'
-  if (lower.includes('quality score')) return 'low_quality'
+  if (lower.includes('quality score') || lower.includes('reliability score')) return 'low_quality'
   if (lower.includes('history') || lower.includes('closed position')) return 'too_little_history'
   if (lower.includes('recent trade') || lower.includes('market')) return 'weak_sample'
   if (lower.includes('exposure')) return 'open_exposure_risk'

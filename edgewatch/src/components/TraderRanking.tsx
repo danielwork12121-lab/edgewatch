@@ -36,8 +36,8 @@ function TraderCard({ entry, rank, onSelect }: {
         <div className="trader-card-top">
           <span className="trader-card-name">{display}</span>
           <div className="trader-card-badges">
-            <span className={`confidence-badge ${conf.cls}`}>
-              Confidence: {conf.label}
+          <span className={`confidence-badge ${conf.cls}`}>
+              Entry timing data confidence: {conf.label}
             </span>
             {entry.totalResolved >= 3 && (
               <span className="confidence-badge badge-green" style={{ background: 'none', border: '1px solid var(--border)' }}>
@@ -139,7 +139,7 @@ export default function TraderRanking({ events, categoryLabel, onSelectWallet, a
         <h3 className="markets-list-title">Top {categoryLabel} Traders</h3>
         <p className="score-disclaimer" style={{ marginBottom: 12 }}>
           Ranked by volume + entry timing edge. Timing score = % trades where price moved
-          in their direction after entry.
+          in their direction after entry. This is separate from trader reliability.
         </p>
         <button className="search-btn" onClick={load}>Load Top Traders</button>
         {error && <p className="error-msg" style={{ marginTop: 10 }}>{error}</p>}

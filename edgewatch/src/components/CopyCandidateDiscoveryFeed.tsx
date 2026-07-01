@@ -17,7 +17,7 @@ const REJECTION_LABELS: Record<string, string> = {
   severe_losing_streak: 'severe losing streak',
   severe_drawdown: 'severe drawdown',
   weak_sample: 'weak sample',
-  low_quality: 'low quality score',
+  low_quality: 'low reliability score',
   lucky_win_risk: 'lucky win / outlier risk',
   outlier_driven: 'outlier-driven profit',
   open_exposure_risk: 'high open exposure',
@@ -32,9 +32,9 @@ const devLog = (...args: unknown[]) => {
 
 function tierLabel(tier: HotTraderEntry['candidateTier']): string {
   switch (tier) {
-    case 'reliable': return 'Copy-ready'
-    case 'watch': return 'Strong watch'
-    case 'emerging': return 'Emerging — limited evidence'
+    case 'reliable': return 'Reliable candidate'
+    case 'watch': return 'Watchlist candidate'
+    case 'emerging': return 'Emerging candidate — limited evidence'
     default: return 'Rejected'
   }
 }
@@ -64,8 +64,8 @@ function CandidateCard({ trader, onSelectWallet }: { trader: HotTraderEntry; onS
             <span className={`confidence-badge ${trader.reliabilityScore >= 75 ? 'badge-green' : trader.reliabilityScore >= 60 ? 'badge-yellow' : 'badge-orange'}`}>
               Reliability {trader.reliabilityScore}/100
             </span>
-            <span className={`confidence-badge ${trader.confidence === 'High' ? 'badge-green' : trader.confidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
-              Data confidence {trader.confidence}
+            <span className={`confidence-badge ${trader.dataConfidence === 'High' ? 'badge-green' : trader.dataConfidence === 'Medium' ? 'badge-yellow' : 'badge-orange'}`}>
+              {trader.dataConfidenceLabel}
             </span>
             {trader.profitFactor !== null && (
               <span className="confidence-badge badge-yellow">PF {trader.profitFactor.toFixed(2)}</span>
@@ -154,7 +154,7 @@ function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
 
   return (
     <div className="scan-summary-panel">
-      <div className="scan-summary-grid">
+        <div className="scan-summary-grid">
         <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.scannedTrades.toLocaleString()}</span>
           <span className="scan-summary-label">trades scanned</span>
@@ -169,11 +169,11 @@ function ScanSummaryPanel({ result }: { result: CopyDiscoveryResult }) {
         </div>
         <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.reliableCandidates}</span>
-          <span className="scan-summary-label">copy-ready</span>
+          <span className="scan-summary-label">reliable</span>
         </div>
         <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.watchCandidates}</span>
-          <span className="scan-summary-label">strong watch</span>
+          <span className="scan-summary-label">watchlist</span>
         </div>
         <div className="scan-summary-stat">
           <span className="scan-summary-value">{summary.emergingCandidates}</span>
@@ -252,9 +252,9 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
     <section className="homepage-section hot-traders-section">
       <div className="section-heading">
         <div>
-          <h2 className="section-title">Copy Candidate Discovery</h2>
+          <h2 className="section-title">Trader Reliability Discovery</h2>
           <p className="section-subtitle">
-            Repeatable Trader Quality scoring — consistency over lucky wins. Only genuinely promising wallets surface.
+            Repeatable trader reliability scoring — consistency over lucky wins. Only genuinely promising wallets surface.
           </p>
         </div>
         <div className="refresh-bar">
@@ -273,7 +273,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
       {!loading && showReliable && (
         <div className="candidate-section">
           <div className="section-heading" style={{ marginBottom: 12 }}>
-            <h3 className="markets-list-title">Reliable Copy Candidates ({result?.reliable.length ?? 0})</h3>
+            <h3 className="markets-list-title">Reliable Candidates ({result?.reliable.length ?? 0})</h3>
           </div>
           <div className="trader-list">
             {result?.reliable.map(trader => (
@@ -286,7 +286,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
       {!loading && showWatch && (
         <div className="candidate-section">
           <div className="section-heading" style={{ marginBottom: 12 }}>
-            <h3 className="markets-list-title">Strong Watch Candidates ({result?.watchlist.length ?? 0})</h3>
+            <h3 className="markets-list-title">Watchlist Candidates ({result?.watchlist.length ?? 0})</h3>
           </div>
           <div className="trader-list">
             {result?.watchlist.map(trader => (
@@ -302,7 +302,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
             <h3 className="markets-list-title">Emerging Traders ({result?.emerging.length ?? 0})</h3>
           </div>
           <p className="score-disclaimer" style={{ marginBottom: 12 }}>
-            Limited evidence — clean recent signals but not enough history for copy-ready status.
+            Limited evidence — clean recent signals but not enough history for reliable status.
           </p>
           <div className="trader-list">
             {result?.emerging.map(trader => (
@@ -313,7 +313,7 @@ export default function CopyCandidateDiscoveryFeed({ onSelectWallet }: Props) {
       )}
 
       {!loading && noStrongCandidates && result && result.state !== 'error' && (
-        <p className="empty-msg">No strong copy candidates found in this scan.</p>
+        <p className="empty-msg">No reliable or watchlist traders found in this scan.</p>
       )}
 
       {!loading && nearMisses.length > 0 && (
